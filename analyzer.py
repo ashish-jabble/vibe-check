@@ -26,11 +26,38 @@ REQUEST_HEADERS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+    "Cache-Control": "max-age=0",
 }
-REQUEST_TIMEOUT = 12
+
+ALT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+
+REQUEST_TIMEOUT = 15
 MAX_CRAWL_PAGES = 6
 MAX_ASSET_FETCH = 10
+
+HTTP_ERROR_MESSAGES = {
+    401: "This site requires authentication. VibeCheck can only analyze publicly accessible pages.",
+    403: "This site blocked our request (HTTP 403 Forbidden). It may use bot protection (Cloudflare, etc.). Try a different URL from the same site.",
+    404: "Page not found (HTTP 404). Check the URL and try again.",
+    429: "Too many requests (HTTP 429). The site is rate-limiting us. Try again in a minute.",
+    500: "The target site returned a server error (HTTP 500). Try again later.",
+    502: "The target site returned a bad gateway error (HTTP 502). Try again later.",
+    503: "The target site is temporarily unavailable (HTTP 503). Try again later.",
+}
 
 
 # ── Evidence Tier System ────────────────────────────────────────────
@@ -199,7 +226,9 @@ class VibeCodingAnalyzer:
         base_origin = f"{parsed.scheme}://{parsed.netloc}"
 
         # 1. Fetch primary page
-        primary = self._fetch_page(url)
+        primary = self._fetch_page(url, is_primary=True)
+        if isinstance(primary, str):
+            return {"error": primary}
         if primary is None:
             return {"error": f"Failed to fetch {url}. Check the URL and try again."}
 
@@ -273,14 +302,62 @@ class VibeCodingAnalyzer:
     # Fetching
     # ================================================================
 
-    def _fetch_page(self, url):
-        try:
-            resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT,
-                                allow_redirects=True)
-            resp.raise_for_status()
-            return PageData(url, resp.text, dict(resp.headers), BeautifulSoup(resp.text, "lxml"))
-        except Exception:
-            return None
+    def _fetch_page(self, url, is_primary=False):
+        """Fetch a page. If is_primary, retry with alternate headers and return error string on failure."""
+        last_error = None
+        for attempt in range(2):
+            headers = dict(REQUEST_HEADERS)
+            if attempt == 1:
+                headers["User-Agent"] = ALT_USER_AGENT
+            try:
+                resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
+                                    allow_redirects=True)
+                resp.raise_for_status()
+                return PageData(url, resp.text, dict(resp.headers),
+                                BeautifulSoup(resp.text, "lxml"))
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                # On 403, retry with alternate UA before giving up
+                if status == 403 and attempt == 0:
+                    last_error = status
+                    continue
+                if is_primary:
+                    msg = HTTP_ERROR_MESSAGES.get(
+                        status,
+                        f"The site returned HTTP {status}. Check the URL and try again.",
+                    )
+                    return msg
+                return None
+            except requests.exceptions.Timeout:
+                if is_primary and attempt == 1:
+                    return "Request timed out. The site took too long to respond."
+                last_error = "timeout"
+                continue
+            except requests.exceptions.ConnectionError as exc:
+                err_str = str(exc).lower()
+                if is_primary:
+                    if "connection reset" in err_str or "connection aborted" in err_str:
+                        return (
+                            "Connection blocked by the site's bot protection (likely Cloudflare). "
+                            "This site actively rejects automated requests. "
+                            "Try analyzing the homepage or a different page."
+                        )
+                    return "Could not connect to the site. Check the URL or your network connection."
+                return None
+            except requests.exceptions.TooManyRedirects:
+                if is_primary:
+                    return "Too many redirects. The site may be misconfigured."
+                return None
+            except Exception as exc:
+                if is_primary:
+                    return f"Failed to fetch: {str(exc)[:200]}"
+                return None
+
+        # Both attempts failed
+        if is_primary:
+            msg = HTTP_ERROR_MESSAGES.get(last_error, "Failed to fetch the page after retrying.")
+            return msg
+        return None
 
     def _fetch_pages_parallel(self, urls):
         results = []
