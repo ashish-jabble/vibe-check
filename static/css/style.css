@@ -81,6 +81,7 @@ a {
     text-decoration: none;
     transition: color var(--transition-fast);
 }
+
 a:hover {
     color: var(--accent-light);
 }
@@ -107,12 +108,15 @@ a:hover {
         transform: translateY(100vh) scale(0);
         opacity: 0;
     }
+
     10% {
         opacity: 0.15;
     }
+
     90% {
         opacity: 0.15;
     }
+
     100% {
         transform: translateY(-10vh) scale(1);
         opacity: 0;
@@ -165,6 +169,7 @@ a:hover {
     font-weight: 500;
     transition: color var(--transition-fast);
 }
+
 .nav-link:hover {
     color: var(--text-primary);
 }
@@ -207,8 +212,17 @@ main {
 }
 
 @keyframes pulse-dot {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(0.8); }
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.5;
+        transform: scale(0.8);
+    }
 }
 
 .hero-title {
@@ -274,6 +288,7 @@ main {
     padding: 12px 0;
     min-width: 0;
 }
+
 .input-wrapper input::placeholder {
     color: var(--text-muted);
 }
@@ -296,13 +311,16 @@ main {
     transition: opacity var(--transition-fast), transform var(--transition-fast);
     min-width: 110px;
 }
+
 .analyze-btn:hover {
     opacity: 0.9;
     transform: translateY(-1px);
 }
+
 .analyze-btn:active {
     transform: translateY(0);
 }
+
 .analyze-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -312,8 +330,11 @@ main {
 .spinner {
     animation: spin 1s linear infinite;
 }
+
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .input-hint {
@@ -348,11 +369,13 @@ main {
     border-top-color: var(--accent);
     animation: spin 2s linear infinite;
 }
+
 .ring-2 {
     inset: 12px;
     border-right-color: var(--accent-light);
     animation: spin 2.5s linear infinite reverse;
 }
+
 .ring-3 {
     inset: 24px;
     border-bottom-color: #6366f1;
@@ -370,8 +393,17 @@ main {
 }
 
 @keyframes pulse-core {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.6; transform: scale(0.9); }
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.6;
+        transform: scale(0.9);
+    }
 }
 
 .loading-text {
@@ -397,6 +429,7 @@ main {
     position: relative;
     transition: color var(--transition-default);
 }
+
 .loading-steps .step::before {
     content: "";
     position: absolute;
@@ -409,17 +442,21 @@ main {
     border: 2px solid var(--border-default);
     transition: background var(--transition-default), border-color var(--transition-default);
 }
+
 .loading-steps .step.active {
     color: var(--text-accent);
 }
+
 .loading-steps .step.active::before {
     background: var(--accent);
     border-color: var(--accent);
     box-shadow: 0 0 8px var(--accent-glow);
 }
+
 .loading-steps .step.done {
     color: var(--success);
 }
+
 .loading-steps .step.done::before {
     background: var(--success);
     border-color: var(--success);
@@ -434,8 +471,15 @@ main {
 }
 
 @keyframes fadeInUp {
-    from { opacity: 0; transform: translateY(30px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .results-header {
@@ -539,6 +583,27 @@ main {
     word-break: break-all;
 }
 
+.scan-stats {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+}
+
+.stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-full);
+    letter-spacing: 0.01em;
+}
+
 /* ── Category Cards ─────────────────────────────────────────────── */
 .categories-grid {
     display: grid;
@@ -555,6 +620,7 @@ main {
     transition: border-color var(--transition-default), transform var(--transition-default);
     cursor: default;
 }
+
 .category-card:hover {
     border-color: var(--border-default);
     transform: translateY(-2px);
@@ -592,14 +658,17 @@ main {
     color: var(--success);
     background: rgba(34, 197, 94, 0.1);
 }
+
 .category-score.score-medium {
     color: var(--warning);
     background: rgba(245, 158, 11, 0.1);
 }
+
 .category-score.score-high {
     color: var(--orange);
     background: rgba(249, 115, 22, 0.1);
 }
+
 .category-score.score-critical {
     color: var(--danger);
     background: rgba(239, 68, 68, 0.1);
@@ -621,10 +690,21 @@ main {
     width: 0;
 }
 
-.category-progress-fill.fill-low { background: var(--success); }
-.category-progress-fill.fill-medium { background: var(--warning); }
-.category-progress-fill.fill-high { background: var(--orange); }
-.category-progress-fill.fill-critical { background: var(--danger); }
+.category-progress-fill.fill-low {
+    background: var(--success);
+}
+
+.category-progress-fill.fill-medium {
+    background: var(--warning);
+}
+
+.category-progress-fill.fill-high {
+    background: var(--orange);
+}
+
+.category-progress-fill.fill-critical {
+    background: var(--danger);
+}
 
 /* Findings list */
 .findings-list {
@@ -657,10 +737,12 @@ main {
     color: var(--danger);
     background: rgba(239, 68, 68, 0.12);
 }
+
 .finding-badge.confidence-medium {
     color: var(--warning);
     background: rgba(245, 158, 11, 0.12);
 }
+
 .finding-badge.confidence-low {
     color: var(--text-muted);
     background: var(--bg-elevated);
@@ -694,6 +776,7 @@ main {
     cursor: pointer;
     transition: background var(--transition-fast), border-color var(--transition-fast);
 }
+
 .try-another-btn:hover {
     background: var(--bg-card-hover);
     border-color: var(--accent);

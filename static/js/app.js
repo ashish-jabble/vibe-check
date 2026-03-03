@@ -23,6 +23,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const verdictText = document.getElementById("verdictText");
     const verdictUrl = document.getElementById("verdictUrl");
     const categoriesGrid = document.getElementById("categoriesGrid");
+    const scanStats = document.getElementById("scanStats");
     const errorMessage = document.getElementById("errorMessage");
 
     const tryAnotherBtn = document.getElementById("tryAnotherBtn");
@@ -140,6 +141,12 @@ document.addEventListener("DOMContentLoaded", () => {
         verdictText.textContent = data.verdict;
         verdictUrl.textContent = data.url;
 
+        // Scan stats
+        scanStats.innerHTML = `
+            <span class="stat-chip">📄 ${data.pages_analyzed} page${data.pages_analyzed > 1 ? "s" : ""} analyzed</span>
+            <span class="stat-chip">📦 ${data.assets_analyzed} asset${data.assets_analyzed > 1 ? "s" : ""} scanned</span>
+        `;
+
         // Categories
         categoriesGrid.innerHTML = "";
         const orderedCategories = [
@@ -185,20 +192,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 <div class="category-progress-fill ${fillClass}" data-width="${cat.score}%"></div>
             </div>
             <div class="findings-list">
-                ${
-                    cat.findings.length === 0
-                        ? '<div class="no-findings">No signals detected</div>'
-                        : cat.findings
-                              .map(
-                                  (f) => `
+                ${cat.findings.length === 0
+                ? '<div class="no-findings">No signals detected</div>'
+                : cat.findings
+                    .map(
+                        (f) => `
                         <div class="finding-item">
                             <span class="finding-badge confidence-${f.confidence}">${f.confidence}</span>
-                            <span>${escapeHtml(f.description)}${f.evidence ? ` <span style="color:var(--text-muted)">(${escapeHtml(f.evidence)})</span>` : ""}</span>
+                            <span>${escapeHtml(f.description)}${f.evidence ? ` <span style="color:var(--text-muted)">(${escapeHtml(f.evidence)})</span>` : ""}${f.page ? ` <span style="color:var(--text-muted);font-size:0.72rem">on ${escapeHtml(f.page)}</span>` : ""}</span>
                         </div>
                     `
-                              )
-                              .join("")
-                }
+                    )
+                    .join("")
+            }
             </div>
         `;
 
