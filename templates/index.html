@@ -27,7 +27,7 @@
                 <span class="logo-text">VibeCheck</span>
             </a>
             <nav class="header-nav">
-                <a href="https://github.com" target="_blank" class="nav-link">GitHub</a>
+                <a href="https://github.com/ashish-jabble/vibe-check" target="_blank" class="nav-link">GitHub</a>
             </nav>
         </div>
     </header>
@@ -38,14 +38,14 @@
         <section class="hero" id="hero">
             <div class="hero-badge">
                 <span class="badge-dot"></span>
-                AI-Powered Analysis Engine
+                Evidence-Based Analysis Engine
             </div>
             <h1 class="hero-title">
                 Was this site <span class="gradient-text">vibe coded</span>?
             </h1>
             <p class="hero-subtitle">
-                Paste any URL and our engine scans for telltale signs of AI-assisted code generation — from framework
-                fingerprints to generic copy patterns.
+                Paste any URL. We crawl pages, fetch assets, and score based on <strong>real evidence</strong> — not
+                assumptions. Every point in the score is backed by a concrete, verifiable finding.
             </p>
 
             <form class="url-form" id="urlForm">
@@ -69,8 +69,7 @@
                         </span>
                     </button>
                 </div>
-                <p class="input-hint">We'll crawl internal pages, fetch CSS/JS assets, and run 7 detection categories.
-                </p>
+                <p class="input-hint">We crawl internal pages, fetch CSS/JS assets, and run 9 detection categories.</p>
             </form>
         </section>
 
@@ -93,8 +92,8 @@
                 <div class="step active">Fetching primary page</div>
                 <div class="step">Crawling internal pages</div>
                 <div class="step">Fetching CSS & JS assets</div>
-                <div class="step">Running 7 detection categories</div>
-                <div class="step">Aggregating & scoring</div>
+                <div class="step">Running 9 detection categories</div>
+                <div class="step">Computing evidence-based score</div>
             </div>
         </section>
 
@@ -121,6 +120,11 @@
                     <p class="verdict-url" id="verdictUrl"></p>
                     <div class="scan-stats" id="scanStats"></div>
                 </div>
+            </div>
+
+            <!-- Evidence Summary (NEW) -->
+            <div class="evidence-summary" id="evidenceSummary">
+                <!-- Populated by JS -->
             </div>
 
             <!-- Category breakdown -->
@@ -154,7 +158,8 @@
 
     <!-- ── Footer ───────────────────────────────────────────────── -->
     <footer class="site-footer">
-        <p>Built with curiosity. VibeCheck uses heuristic analysis — results are indicative, not definitive.</p>
+        <p>Evidence-based analysis — every point in the score is backed by a verifiable finding. Results are indicative,
+            not definitive.</p>
     </footer>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>

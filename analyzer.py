@@ -1,7 +1,15 @@
 """
-VibeCheck Analyzer — Core detection engine.
-Analyzes a website's HTML, headers, linked assets, and multiple pages
-to determine if it was likely built using AI-assisted "vibe coding" tools.
+VibeCheck Analyzer — Evidence-Based Detection Engine.
+
+Scores are NOT based on assumptions/arbitrary weights.
+Every point in the score is backed by a concrete, verifiable finding
+classified into evidence tiers with fixed point values and contribution caps.
+
+Evidence Tiers:
+  - DEFINITIVE: Irrefutable proof (e.g., v0.dev data attributes, meta generator tag)
+  - STRONG:     Very likely signal (e.g., full shadcn stack in bundles, Lovable references)
+  - MODERATE:   Circumstantial evidence (e.g., heavy Tailwind, generic copy)
+  - WEAK:       Only meaningful with other evidence (e.g., dark mode, Vercel deployment)
 """
 
 import re
@@ -9,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 
 
 # ── Request constants ───────────────────────────────────────────────
@@ -20,26 +29,60 @@ REQUEST_HEADERS = {
     )
 }
 REQUEST_TIMEOUT = 12
-MAX_CRAWL_PAGES = 6       # homepage + up to 5 internal pages
-MAX_ASSET_FETCH = 10      # max CSS/JS files to fetch
+MAX_CRAWL_PAGES = 6
+MAX_ASSET_FETCH = 10
+
+
+# ── Evidence Tier System ────────────────────────────────────────────
+
+class Tier:
+    DEFINITIVE = "definitive"   # Hard proof — each worth 25 pts
+    STRONG     = "strong"       # Very likely — each worth 10 pts, capped at 40 total
+    MODERATE   = "moderate"     # Circumstantial — each worth 4 pts, capped at 25 total
+    WEAK       = "weak"         # Context only — each worth 2 pts, capped at 10 total
+
+TIER_POINTS = {
+    Tier.DEFINITIVE: 25,
+    Tier.STRONG:     10,
+    Tier.MODERATE:    4,
+    Tier.WEAK:        2,
+}
+
+TIER_CAPS = {
+    Tier.DEFINITIVE: 100,  # no cap – definitive proof should dominate
+    Tier.STRONG:      40,
+    Tier.MODERATE:    25,
+    Tier.WEAK:        10,
+}
+
+TIER_LABELS = {
+    Tier.DEFINITIVE: "Hard Proof",
+    Tier.STRONG:     "Strong Signal",
+    Tier.MODERATE:   "Indicator",
+    Tier.WEAK:       "Context",
+}
 
 
 class Finding:
-    """Represents a single detection finding."""
+    """One piece of evidence."""
 
-    def __init__(self, signal: str, description: str, confidence: str = "medium",
-                 evidence: str = "", page: str = ""):
+    def __init__(self, signal: str, description: str, tier: str,
+                 evidence: str = "", page: str = "", category: str = ""):
         self.signal = signal
         self.description = description
-        self.confidence = confidence  # "high", "medium", "low"
+        self.tier = tier
         self.evidence = evidence
-        self.page = page  # which page the finding came from
+        self.page = page
+        self.category = category
+        self.points = TIER_POINTS.get(tier, 0)
 
     def to_dict(self):
         d = {
             "signal": self.signal,
             "description": self.description,
-            "confidence": self.confidence,
+            "tier": self.tier,
+            "tier_label": TIER_LABELS.get(self.tier, "Unknown"),
+            "points": self.points,
             "evidence": self.evidence,
         }
         if self.page:
@@ -48,13 +91,17 @@ class Finding:
 
 
 class CategoryResult:
-    """Result for a single analysis category."""
+    """Result for one analysis category."""
 
-    def __init__(self, name: str, icon: str, score: int = 0, findings: list = None):
+    def __init__(self, name: str, icon: str, findings: list = None):
         self.name = name
         self.icon = icon
-        self.score = score
         self.findings = findings or []
+
+    @property
+    def score(self):
+        """Category score = sum of finding points (capped by tier)."""
+        return _compute_tiered_score(self.findings)
 
     def to_dict(self):
         return {
@@ -65,10 +112,21 @@ class CategoryResult:
         }
 
 
-# ── PageData: one fetched page ──────────────────────────────────────
-class PageData:
-    """Holds raw + parsed data for a single page."""
+def _compute_tiered_score(findings: list) -> int:
+    """Compute a score from findings using tiered point values and caps."""
+    tier_totals = {t: 0 for t in (Tier.DEFINITIVE, Tier.STRONG, Tier.MODERATE, Tier.WEAK)}
+    for f in findings:
+        tier_totals[f.tier] = tier_totals.get(f.tier, 0) + f.points
 
+    total = 0
+    for tier, points in tier_totals.items():
+        total += min(points, TIER_CAPS.get(tier, 0))
+    return min(100, total)
+
+
+# ── PageData ────────────────────────────────────────────────────────
+
+class PageData:
     def __init__(self, url: str, html: str, headers: dict, soup: BeautifulSoup):
         self.url = url
         self.html = html
@@ -77,152 +135,108 @@ class PageData:
         self.parsed = urlparse(url)
 
 
+# ── NPM packages strongly associated with vibe coding ──────────────
+VIBE_PACKAGES = [
+    "@radix-ui/", "lucide-react", "class-variance-authority", "clsx",
+    "tailwind-merge", "cmdk", "@hookform/resolvers", "react-hook-form",
+    "zod", "sonner", "vaul", "embla-carousel", "input-otp", "recharts",
+    "next-themes",
+]
+
+# shadcn/ui signature class combos
+SHADCN_PATTERNS = [
+    "inline-flex items-center justify-center",
+    "inline-flex items-center rounded-full border",
+    "relative w-full rounded-lg border",
+    "fixed inset-0 z-50 bg-black/80",
+    "flex h-full w-full items-center justify-center rounded-full",
+    "relative flex cursor-default select-none items-center rounded-sm",
+    "shrink-0 rounded-sm border border-primary",
+]
+
+# shadcn CSS custom properties
+SHADCN_VARS = [
+    "--radius", "--primary", "--ring", "--card", "--popover",
+    "--muted", "--accent", "--destructive",
+]
+
+TEMPLATE_SECTIONS = ["hero", "features", "testimonials", "pricing", "faq", "cta", "footer"]
+
+GENERIC_PHRASES = [
+    r"transform your", r"revolutionize", r"empower your",
+    r"take your .+ to the next level", r"unlock the (full )?power",
+    r"supercharge your", r"streamline your", r"elevate your",
+    r"reimagine", r"cutting[- ]edge", r"next[- ]gen(eration)?",
+    r"state[- ]of[- ]the[- ]art", r"game[- ]chang(er|ing)",
+    r"seamless(ly)?", r"effortless(ly)?", r"blazing[- ]fast",
+    r"lightning[- ]fast", r"world[- ]class", r"enterprise[- ]grade",
+    r"built for the future", r"designed for .+ by .+",
+]
+
+GENERIC_CTAS = [
+    "get started", "learn more", "sign up", "join now", "try it free",
+    "start free trial", "book a demo", "request access", "join the waitlist",
+    "coming soon", "start building", "get early access", "try for free",
+]
+
+STOCK_DOMAINS = [
+    "unsplash.com", "images.pexels.com", "placeholder.com", "placehold.co",
+    "placekitten.com", "picsum.photos", "via.placeholder.com", "dummyimage.com",
+]
+
+
+# ====================================================================
+# Main Analyzer
+# ====================================================================
+
 class VibeCodingAnalyzer:
-    """Main analyzer — fetches a URL (+ internal pages & assets) and runs all heuristic checks."""
-
-    # Category weights for overall score
-    WEIGHTS = {
-        "ai_platforms": 0.30,
-        "ui_libraries": 0.15,
-        "frameworks": 0.10,
-        "content": 0.15,
-        "code_style": 0.10,
-        "deployment": 0.10,
-        "design_patterns": 0.10,
-    }
-
-    # ── Generic marketing phrases commonly generated by AI ──────────────
-    GENERIC_PHRASES = [
-        r"transform your",
-        r"revolutionize",
-        r"empower your",
-        r"take your .+ to the next level",
-        r"unlock the (full )?power",
-        r"supercharge your",
-        r"streamline your",
-        r"elevate your",
-        r"reimagine",
-        r"cutting[- ]edge",
-        r"next[- ]gen(eration)?",
-        r"state[- ]of[- ]the[- ]art",
-        r"game[- ]chang(er|ing)",
-        r"seamless(ly)?",
-        r"effortless(ly)?",
-        r"blazing[- ]fast",
-        r"lightning[- ]fast",
-        r"world[- ]class",
-        r"enterprise[- ]grade",
-        r"built for the future",
-        r"designed for .+ by .+",
-    ]
-
-    GENERIC_CTAS = [
-        "get started",
-        "learn more",
-        "sign up",
-        "join now",
-        "try it free",
-        "start free trial",
-        "book a demo",
-        "request access",
-        "join the waitlist",
-        "coming soon",
-        "start building",
-        "get early access",
-        "try for free",
-    ]
-
-    # ── shadcn/ui signature class combinations ──────────────────────────
-    SHADCN_CLASS_PATTERNS = [
-        "inline-flex items-center justify-center",
-        "inline-flex items-center rounded-full border",
-        "relative w-full rounded-lg border",
-        "fixed inset-0 z-50 bg-black/80",
-        "flex h-full w-full items-center justify-center rounded-full",
-        "relative flex cursor-default select-none items-center rounded-sm",
-        "shrink-0 rounded-sm border border-primary",
-    ]
-
-    # ── Cookie-cutter layout section order ──────────────────────────────
-    TEMPLATE_SECTION_NAMES = [
-        "hero",
-        "features",
-        "testimonials",
-        "pricing",
-        "faq",
-        "cta",
-        "footer",
-    ]
-
-    # ── NPM packages strongly associated with vibe coding ──────────────
-    VIBE_NPM_PACKAGES = [
-        "@radix-ui/",
-        "lucide-react",
-        "class-variance-authority",
-        "clsx",
-        "tailwind-merge",
-        "cmdk",
-        "@hookform/resolvers",
-        "react-hook-form",
-        "zod",
-        "sonner",
-        "vaul",
-        "embla-carousel",
-        "input-otp",
-        "recharts",
-        "next-themes",
-    ]
-
-    # ================================================================
-    # Public API
-    # ================================================================
 
     def analyze(self, url: str) -> dict:
-        """Main entry — fetch + crawl + analyze a URL and return results."""
-        # Normalise the URL
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
         parsed = urlparse(url)
         base_origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        # ── 1. Fetch the primary page ───────────────────────────────────
+        # 1. Fetch primary page
         primary = self._fetch_page(url)
         if primary is None:
             return {"error": f"Failed to fetch {url}. Check the URL and try again."}
 
-        pages: list[PageData] = [primary]
+        pages = [primary]
 
-        # ── 2. Discover & fetch internal pages (parallel) ───────────────
-        internal_links = self._discover_internal_links(primary, base_origin)
-        if internal_links:
-            extra_pages = self._fetch_pages_parallel(internal_links)
-            pages.extend(extra_pages)
+        # 2. Crawl internal pages
+        internal = self._discover_internal_links(primary, base_origin)
+        if internal:
+            pages.extend(self._fetch_pages_parallel(internal))
 
-        # ── 3. Fetch linked CSS / JS assets ─────────────────────────────
+        # 3. Fetch linked assets
         css_texts, js_texts = self._fetch_linked_assets(primary, base_origin)
+        asset_text = "\n".join(css_texts + js_texts)
 
-        # Combine all asset text for deeper analysis
-        all_asset_text = "\n".join(css_texts + js_texts)
-
-        # ── 4. Run every category across ALL pages + assets ─────────────
+        # 4. Run ALL detection categories
         categories = {
-            "ai_platforms": self._check_ai_platforms(pages, all_asset_text),
-            "ui_libraries": self._check_ui_libraries(pages, all_asset_text),
-            "frameworks": self._check_frameworks(pages, all_asset_text),
-            "content": self._check_content(pages),
-            "code_style": self._check_code_style(pages, all_asset_text),
-            "deployment": self._check_deployment(pages, base_origin),
-            "design_patterns": self._check_design_patterns(pages, all_asset_text),
+            "ai_platforms":    self._check_ai_platforms(pages, asset_text),
+            "ui_libraries":    self._check_ui_libraries(pages, asset_text),
+            "frameworks":      self._check_frameworks(pages, asset_text),
+            "content":         self._check_content(pages),
+            "code_quality":    self._check_code_quality(pages, asset_text),
+            "deployment":      self._check_deployment(pages, base_origin),
+            "design_patterns": self._check_design_patterns(pages, asset_text),
+            "accessibility":   self._check_accessibility(pages),
+            "seo_quality":     self._check_seo(pages),
         }
 
-        # ── 5. Compute overall weighted score ───────────────────────────
-        overall = sum(
-            categories[cat].score * self.WEIGHTS[cat] for cat in categories
-        )
-        overall = min(100, int(round(overall)))
+        # 5. Compute EVIDENCE-BASED score
+        all_findings = []
+        for cat in categories.values():
+            all_findings.extend(cat.findings)
 
+        overall = _compute_tiered_score(all_findings)
         verdict, verdict_emoji = self._get_verdict(overall)
+
+        # Evidence breakdown for transparency
+        evidence_summary = self._build_evidence_summary(all_findings)
 
         return {
             "url": url,
@@ -232,671 +246,688 @@ class VibeCodingAnalyzer:
             "pages_analyzed": len(pages),
             "assets_analyzed": len(css_texts) + len(js_texts),
             "pages_list": [p.url for p in pages],
+            "evidence_summary": evidence_summary,
             "categories": {k: v.to_dict() for k, v in categories.items()},
         }
 
     # ================================================================
-    # Fetching helpers
+    # Evidence summary
     # ================================================================
 
-    def _fetch_page(self, url: str) -> PageData | None:
-        """Fetch a single page and return PageData, or None on failure."""
+    def _build_evidence_summary(self, findings: list) -> dict:
+        tier_counts = Counter(f.tier for f in findings)
+        tier_points = {}
+        for tier in (Tier.DEFINITIVE, Tier.STRONG, Tier.MODERATE, Tier.WEAK):
+            raw = sum(f.points for f in findings if f.tier == tier)
+            capped = min(raw, TIER_CAPS[tier])
+            tier_points[tier] = {
+                "count": tier_counts.get(tier, 0),
+                "raw_points": raw,
+                "capped_points": capped,
+                "cap": TIER_CAPS[tier],
+                "label": TIER_LABELS[tier],
+            }
+        return tier_points
+
+    # ================================================================
+    # Fetching
+    # ================================================================
+
+    def _fetch_page(self, url):
         try:
             resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT,
                                 allow_redirects=True)
             resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "lxml")
-            return PageData(url, resp.text, dict(resp.headers), soup)
+            return PageData(url, resp.text, dict(resp.headers), BeautifulSoup(resp.text, "lxml"))
         except Exception:
             return None
 
-    def _fetch_pages_parallel(self, urls: list[str]) -> list[PageData]:
-        """Fetch multiple pages in parallel, return list of PageData."""
+    def _fetch_pages_parallel(self, urls):
         results = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(self._fetch_page, u): u for u in urls}
-            for future in as_completed(futures):
-                page = future.result()
-                if page is not None:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {pool.submit(self._fetch_page, u): u for u in urls}
+            for f in as_completed(futs):
+                page = f.result()
+                if page:
                     results.append(page)
         return results
 
-    def _discover_internal_links(self, page: PageData, base_origin: str) -> list[str]:
-        """Find unique internal links on a page (same origin, HTML-looking)."""
+    def _discover_internal_links(self, page, base_origin):
         seen = {page.url.rstrip("/")}
         links = []
-
         for a in page.soup.find_all("a", href=True):
             href = a["href"].strip()
-            # Skip anchors, javascript, mailto, tel
             if href.startswith(("#", "javascript:", "mailto:", "tel:")):
                 continue
-
-            full_url = urljoin(page.url, href).split("#")[0].split("?")[0]
-            normalised = full_url.rstrip("/")
-
-            # Same origin only
-            if not full_url.startswith(base_origin):
+            full = urljoin(page.url, href).split("#")[0].split("?")[0]
+            norm = full.rstrip("/")
+            if not full.startswith(base_origin) or norm in seen:
                 continue
-            # Skip non-page resources
-            if re.search(r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|mp4|mp3|ico|woff|woff2|ttf|eot)$",
-                         full_url, re.IGNORECASE):
+            if re.search(r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|mp4|ico|woff2?|ttf|eot)$",
+                         full, re.IGNORECASE):
                 continue
-            # Skip already seen
-            if normalised in seen:
-                continue
-
-            seen.add(normalised)
-            links.append(full_url)
-
+            seen.add(norm)
+            links.append(full)
             if len(links) >= MAX_CRAWL_PAGES - 1:
                 break
-
         return links
 
-    def _fetch_linked_assets(self, page: PageData, base_origin: str) -> tuple[list[str], list[str]]:
-        """Fetch external CSS and JS files linked from the page. Returns (css_texts, js_texts)."""
-        css_urls = []
-        js_urls = []
+    def _fetch_linked_assets(self, page, base_origin):
+        css_urls = [urljoin(page.url, l["href"])
+                    for l in page.soup.find_all("link", rel="stylesheet", href=True)]
+        js_urls = [urljoin(page.url, s["src"])
+                   for s in page.soup.find_all("script", src=True)]
 
-        # CSS: <link rel="stylesheet" href="...">
-        for link in page.soup.find_all("link", rel="stylesheet", href=True):
-            css_urls.append(urljoin(page.url, link["href"]))
-
-        # JS: <script src="...">
-        for script in page.soup.find_all("script", src=True):
-            js_urls.append(urljoin(page.url, script["src"]))
-
-        # Limit total
-        asset_urls = css_urls[:MAX_ASSET_FETCH] + js_urls[:MAX_ASSET_FETCH]
-
-        css_texts = []
-        js_texts = []
-
-        def fetch_asset(url):
+        def fetch(url):
             try:
-                resp = requests.get(url, headers=REQUEST_HEADERS, timeout=8)
-                resp.raise_for_status()
-                # Limit size to avoid huge bundles (max 500KB per asset)
-                text = resp.text[:500_000]
-                return url, text
+                r = requests.get(url, headers=REQUEST_HEADERS, timeout=8)
+                r.raise_for_status()
+                return url, r.text[:500_000]
             except Exception:
                 return url, None
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = {executor.submit(fetch_asset, u): u for u in asset_urls}
-            for future in as_completed(futures):
-                url, text = future.result()
-                if text is None:
+        urls = css_urls[:MAX_ASSET_FETCH] + js_urls[:MAX_ASSET_FETCH]
+        css_texts, js_texts = [], []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for fut in as_completed({pool.submit(fetch, u): u for u in urls}):
+                url, txt = fut.result()
+                if txt is None:
                     continue
-                if url in css_urls:
-                    css_texts.append(text)
-                else:
-                    js_texts.append(text)
-
+                (css_texts if url in css_urls else js_texts).append(txt)
         return css_texts, js_texts
 
     # ================================================================
-    # Category checkers (now operate on list[PageData] + asset text)
+    # 1. AI PLATFORM SIGNATURES
     # ================================================================
 
-    def _check_ai_platforms(self, pages: list[PageData], asset_text: str) -> CategoryResult:
-        result = CategoryResult("AI Platform Signatures", "🤖")
-        findings = []
+    def _check_ai_platforms(self, pages, asset_text):
+        cat = CategoryResult("AI Platform Signatures", "🤖")
+        F = cat.findings
+        html_all = "\n".join(p.html for p in pages)
+        html_lower = html_all.lower()
 
-        # Combine all page HTML for searching
-        combined_html = "\n".join(p.html for p in pages)
-        combined_lower = combined_html.lower()
-        primary = pages[0]
-
-        # ── v0.dev ──────────────────────────────────────────────────────
-        for page in pages:
-            if page.soup.find_all(attrs=lambda attrs: attrs and any(k.startswith("data-v0") for k in attrs)):
-                label = self._page_label(page, primary)
-                findings.append(Finding("v0.dev", "Found data-v0-* attributes — strong v0.dev marker",
-                                        "high", "data-v0-* attributes", label))
+        # ── v0.dev (DEFINITIVE if data attributes found) ────────────────
+        for p in pages:
+            if p.soup.find_all(attrs=lambda a: a and any(k.startswith("data-v0") for k in a)):
+                F.append(Finding("v0.dev", "data-v0-* attributes found — irrefutable v0.dev marker",
+                                 Tier.DEFINITIVE, "data-v0-* attributes"))
                 break
-        if "v0.dev" in combined_lower:
-            findings.append(Finding("v0.dev", "Reference to v0.dev found in page source", "high"))
+        if "v0.dev" in html_lower and not any(f.signal == "v0.dev" for f in F):
+            F.append(Finding("v0.dev", "Reference to v0.dev in source", Tier.STRONG))
 
-        # ── Bolt.new / StackBlitz ───────────────────────────────────────
+        # ── Bolt.new / StackBlitz ──────────────────────────────────────
         for marker in ["bolt.new", "stackblitz"]:
-            if marker in combined_lower:
-                findings.append(Finding("Bolt.new", f"Reference to {marker} found in source", "high"))
-        for page in pages:
-            if page.soup.find_all(attrs={"data-bolt": True}):
-                findings.append(Finding("Bolt.new", "data-bolt attributes detected", "high"))
+            if marker in html_lower:
+                F.append(Finding("Bolt.new", f"'{marker}' reference in source", Tier.STRONG))
+        for p in pages:
+            if p.soup.find_all(attrs={"data-bolt": True}):
+                F.append(Finding("Bolt.new", "data-bolt attributes — definitive Bolt marker",
+                                 Tier.DEFINITIVE))
                 break
 
-        # ── Lovable / GPTEngineer ───────────────────────────────────────
+        # ── Lovable / GPTEngineer ──────────────────────────────────────
         for marker in ["lovable", "gptengineer", "gpt-engineer"]:
-            if marker in combined_lower:
-                findings.append(Finding("Lovable", f"Reference to '{marker}' in source", "high"))
+            if marker in html_lower:
+                F.append(Finding("Lovable", f"'{marker}' reference in source", Tier.STRONG))
 
-        # ── Meta generator tag ──────────────────────────────────────────
-        for page in pages:
-            meta_gen = page.soup.find("meta", attrs={"name": "generator"})
-            if meta_gen:
-                gen_content = (meta_gen.get("content") or "").lower()
+        # ── Meta generator tag (DEFINITIVE) ────────────────────────────
+        for p in pages:
+            meta = p.soup.find("meta", attrs={"name": "generator"})
+            if meta:
+                content = (meta.get("content") or "").lower()
                 for name in ["v0", "bolt", "lovable", "gptengineer", "cursor", "windsurf", "replit"]:
-                    if name in gen_content:
-                        findings.append(Finding(name, f"Meta generator tag contains '{name}'",
-                                                "high", gen_content))
+                    if name in content:
+                        F.append(Finding(name,
+                                         f"Meta generator tag explicitly names '{name}'",
+                                         Tier.DEFINITIVE, content))
 
-        # ── Vercel AI SDK ───────────────────────────────────────────────
-        if re.search(r"@vercel/ai|ai/react|useChat|useCompletion", combined_html):
-            findings.append(Finding("Vercel AI SDK", "Vercel AI SDK references detected", "medium"))
+        # ── Vercel AI SDK ──────────────────────────────────────────────
+        if re.search(r"@vercel/ai|ai/react|useChat|useCompletion", html_all):
+            F.append(Finding("Vercel AI SDK", "Vercel AI SDK references", Tier.MODERATE))
 
-        # ── Check JS bundles for vibe-coding NPM packages ───────────────
+        # ── Vibe-stack packages in JS bundles ──────────────────────────
         if asset_text:
-            vibe_pkg_hits = [pkg for pkg in self.VIBE_NPM_PACKAGES if pkg in asset_text]
-            if len(vibe_pkg_hits) >= 5:
-                findings.append(Finding(
-                    "Vibe Stack Bundle",
-                    f"Found {len(vibe_pkg_hits)} shadcn/vibe-coding packages in JS bundles",
-                    "high",
-                    ", ".join(vibe_pkg_hits[:6]),
-                ))
-            elif len(vibe_pkg_hits) >= 2:
-                findings.append(Finding(
-                    "Vibe Stack Bundle",
-                    f"Found {len(vibe_pkg_hits)} common vibe-coding packages in JS bundles",
-                    "medium",
-                    ", ".join(vibe_pkg_hits),
-                ))
+            hits = [p for p in VIBE_PACKAGES if p in asset_text]
+            if len(hits) >= 6:
+                F.append(Finding("Vibe Stack",
+                                 f"Found {len(hits)} vibe-coding packages in bundles — classic AI-scaffolded stack",
+                                 Tier.STRONG, ", ".join(hits[:6])))
+            elif len(hits) >= 3:
+                F.append(Finding("Vibe Stack",
+                                 f"Found {len(hits)} vibe-coding packages in bundles",
+                                 Tier.MODERATE, ", ".join(hits)))
 
-        # ── Replit ──────────────────────────────────────────────────────
+        # ── Replit ─────────────────────────────────────────────────────
+        primary = pages[0]
         if ".repl.co" in primary.parsed.netloc or ".replit.dev" in primary.parsed.netloc:
-            findings.append(Finding("Replit", "Hosted on Replit domain", "medium"))
-        if "replit" in combined_lower:
-            findings.append(Finding("Replit", "Reference to Replit in source", "medium"))
+            F.append(Finding("Replit", "Hosted on Replit domain", Tier.MODERATE))
+        if "replit" in html_lower:
+            F.append(Finding("Replit", "Replit reference in source", Tier.MODERATE))
 
-        # Score
-        if findings:
-            high_count = sum(1 for f in findings if f.confidence == "high")
-            result.score = min(100, 40 + high_count * 20 + (len(findings) - high_count) * 10)
-        result.findings = findings
-        return result
+        return cat
 
-    def _check_ui_libraries(self, pages: list[PageData], asset_text: str) -> CategoryResult:
-        result = CategoryResult("UI Library Patterns", "🧩")
-        findings = []
+    # ================================================================
+    # 2. UI LIBRARY PATTERNS
+    # ================================================================
 
-        combined_html = "\n".join(p.html for p in pages)
-        all_text = combined_html + "\n" + asset_text
+    def _check_ui_libraries(self, pages, asset_text):
+        cat = CategoryResult("UI Library Patterns", "🧩")
+        F = cat.findings
+        html_all = "\n".join(p.html for p in pages)
+        all_text = html_all + "\n" + asset_text
 
-        # ── Radix UI ────────────────────────────────────────────────────
-        radix_count = 0
-        for page in pages:
-            radix_count += len(page.soup.find_all(
-                attrs=lambda a: a and any(k.startswith("data-radix") for k in a)
-            ))
-        if radix_count:
-            findings.append(Finding("Radix UI",
-                                    f"Found {radix_count} elements with data-radix-* attributes across {len(pages)} page(s)",
-                                    "high", f"{radix_count} elements"))
+        # ── Radix UI ───────────────────────────────────────────────────
+        radix_count = sum(
+            len(p.soup.find_all(attrs=lambda a: a and any(k.startswith("data-radix") for k in a)))
+            for p in pages
+        )
+        if radix_count >= 10:
+            F.append(Finding("Radix UI", f"{radix_count} data-radix-* elements — heavy Radix usage",
+                             Tier.STRONG, f"{radix_count} elements"))
+        elif radix_count >= 1:
+            F.append(Finding("Radix UI", f"{radix_count} data-radix-* elements",
+                             Tier.MODERATE, f"{radix_count} elements"))
 
         if re.search(r"@radix-ui", all_text):
-            findings.append(Finding("Radix UI", "Radix UI package reference in source/bundles", "high"))
+            F.append(Finding("Radix UI", "Radix UI package in source/bundles", Tier.MODERATE))
 
-        # ── shadcn/ui class patterns ────────────────────────────────────
-        shadcn_matches = sum(1 for p in self.SHADCN_CLASS_PATTERNS if p in combined_html)
-        if shadcn_matches >= 2:
-            findings.append(Finding("shadcn/ui", f"Detected {shadcn_matches} shadcn/ui class patterns",
-                                    "high", f"{shadcn_matches} patterns matched"))
-        elif shadcn_matches == 1:
-            findings.append(Finding("shadcn/ui", "Possible shadcn/ui class pattern detected", "medium"))
+        # ── shadcn/ui class patterns ───────────────────────────────────
+        shadcn_hits = sum(1 for p in SHADCN_PATTERNS if p in html_all)
+        if shadcn_hits >= 3:
+            F.append(Finding("shadcn/ui", f"{shadcn_hits} shadcn/ui class patterns matched",
+                             Tier.STRONG, f"{shadcn_hits}/7 patterns"))
+        elif shadcn_hits >= 1:
+            F.append(Finding("shadcn/ui", f"{shadcn_hits} possible shadcn/ui class pattern",
+                             Tier.MODERATE))
 
-        # ── CSS custom properties typical of shadcn (in HTML + CSS assets) ──
-        shadcn_vars = ["--radius", "--primary", "--ring", "--card", "--popover", "--muted",
-                       "--accent", "--destructive"]
-        var_hits = sum(1 for v in shadcn_vars if v in all_text)
-        if var_hits >= 4:
-            findings.append(Finding("shadcn/ui", f"Found {var_hits} shadcn-style CSS custom properties",
-                                    "high", f"{var_hits}/8 variables"))
-        elif var_hits >= 2:
-            findings.append(Finding("shadcn/ui", f"Found {var_hits} possible shadcn CSS variables",
-                                    "medium"))
+        # ── shadcn CSS variables ───────────────────────────────────────
+        var_hits = sum(1 for v in SHADCN_VARS if v in all_text)
+        if var_hits >= 6:
+            F.append(Finding("shadcn/ui", f"{var_hits}/8 shadcn CSS custom properties — confirms shadcn theming",
+                             Tier.STRONG, f"{var_hits}/8 variables"))
+        elif var_hits >= 3:
+            F.append(Finding("shadcn/ui", f"{var_hits} shadcn-style CSS variables",
+                             Tier.MODERATE))
 
-        # ── Lucide Icons ────────────────────────────────────────────────
-        lucide_count = 0
-        for page in pages:
-            lucide_count += len(page.soup.find_all(class_=re.compile(r"lucide")))
+        # ── Full shadcn stack combo (Radix + shadcn vars + Lucide = STRONG) ──
+        has_radix = radix_count >= 1
+        has_vars = var_hits >= 3
+        has_lucide = "lucide" in all_text.lower()
+        if has_radix and has_vars and has_lucide:
+            F.append(Finding("shadcn Stack",
+                             "Full shadcn/ui stack confirmed: Radix + CSS variables + Lucide icons",
+                             Tier.STRONG, "Complete stack detected"))
+
+        # ── Lucide Icons ───────────────────────────────────────────────
+        lucide_count = sum(len(p.soup.find_all(class_=re.compile(r"lucide"))) for p in pages)
         if lucide_count:
-            findings.append(Finding("Lucide Icons", f"Found {lucide_count} Lucide icon elements",
-                                    "medium"))
-        if "lucide-react" in all_text or "lucide.dev" in all_text:
-            findings.append(Finding("Lucide Icons", "Lucide icon library referenced in source/bundles",
-                                    "medium"))
+            F.append(Finding("Lucide Icons", f"{lucide_count} Lucide icon elements", Tier.WEAK))
+        if "lucide-react" in all_text:
+            F.append(Finding("Lucide Icons", "lucide-react package referenced", Tier.WEAK))
 
-        # ── Heroicons ───────────────────────────────────────────────────
-        if "heroicons" in all_text.lower():
-            findings.append(Finding("Heroicons", "Heroicons library referenced", "low"))
+        return cat
 
-        if findings:
-            high_count = sum(1 for f in findings if f.confidence == "high")
-            result.score = min(100, 20 + high_count * 20 + (len(findings) - high_count) * 8)
-        result.findings = findings
-        return result
+    # ================================================================
+    # 3. FRAMEWORK DETECTION
+    # ================================================================
 
-    def _check_frameworks(self, pages: list[PageData], asset_text: str) -> CategoryResult:
-        result = CategoryResult("Framework Detection", "⚡")
-        findings = []
-
-        combined_html = "\n".join(p.html for p in pages)
+    def _check_frameworks(self, pages, asset_text):
+        cat = CategoryResult("Framework Detection", "⚡")
+        F = cat.findings
+        html_all = "\n".join(p.html for p in pages)
         primary = pages[0]
-        all_text = combined_html + "\n" + asset_text
 
-        # ── Next.js ─────────────────────────────────────────────────────
-        for page in pages:
-            if page.soup.find(id="__next"):
-                findings.append(Finding("Next.js", "Found #__next root element", "high"))
+        # Next.js
+        has_next = False
+        for p in pages:
+            if p.soup.find(id="__next"):
+                F.append(Finding("Next.js", "#__next root element", Tier.WEAK))
+                has_next = True
                 break
-        if "/_next/static" in combined_html or "/_next/data" in combined_html:
-            findings.append(Finding("Next.js", "Next.js static asset paths detected", "high"))
+        if "/_next/static" in html_all:
+            F.append(Finding("Next.js", "Next.js static asset paths", Tier.WEAK))
+            has_next = True
         if primary.headers.get("x-powered-by", "").lower() == "next.js":
-            findings.append(Finding("Next.js", "x-powered-by: Next.js header", "high"))
+            F.append(Finding("Next.js", "x-powered-by: Next.js header", Tier.WEAK))
+            has_next = True
 
-        # ── Vite ────────────────────────────────────────────────────────
-        if re.search(r'type="module".*crossorigin', combined_html):
-            findings.append(Finding("Vite", "Vite-style module script detected", "medium"))
-        if "/@vite" in combined_html or "/node_modules/.vite" in combined_html:
-            findings.append(Finding("Vite", "Vite dev server references in source", "high"))
+        # Vite
+        if "/@vite" in html_all or "/node_modules/.vite" in html_all:
+            F.append(Finding("Vite", "Vite dev server references", Tier.WEAK))
 
-        # ── React ───────────────────────────────────────────────────────
-        for page in pages:
-            root_div = page.soup.find(id="root")
-            if root_div and ("react" in page.html.lower() or "reactDOM" in page.html):
-                findings.append(Finding("React", "React application detected", "medium"))
-                break
-        if "_reactListening" in combined_html or "data-reactroot" in combined_html:
-            findings.append(Finding("React", "React DOM markers found", "medium"))
+        # React
+        if asset_text and re.search(r"react-dom|ReactDOM", asset_text):
+            F.append(Finding("React", "React detected in JS bundles", Tier.WEAK))
 
-        # ── React in bundles ────────────────────────────────────────────
-        if asset_text and re.search(r"react-dom|ReactDOM|__REACT_DEVTOOLS", asset_text):
-            if not any(f.signal == "React" for f in findings):
-                findings.append(Finding("React", "React detected in JS bundles", "medium"))
+        # Astro
+        if "astro-island" in html_all or "data-astro" in html_all:
+            F.append(Finding("Astro", "Astro framework detected", Tier.WEAK))
 
-        # ── Nuxt / Vue ──────────────────────────────────────────────────
-        if "__nuxt" in combined_html or "nuxt" in primary.headers.get("x-powered-by", "").lower():
-            findings.append(Finding("Nuxt.js", "Nuxt.js application detected", "medium"))
+        # SvelteKit
+        if "__sveltekit" in html_all:
+            F.append(Finding("SvelteKit", "SvelteKit framework detected", Tier.WEAK))
 
-        # ── Astro ───────────────────────────────────────────────────────
-        if "astro" in combined_html.lower() and ("astro-island" in combined_html or "data-astro" in combined_html):
-            findings.append(Finding("Astro", "Astro framework detected", "medium"))
+        # ── TECH STACK COMBO (this IS a real signal) ───────────────────
+        # Next.js + Vercel + shadcn + Tailwind = classic vibe-coding stack
+        has_vercel = any(k.lower().startswith("x-vercel") for k in primary.headers)
+        has_tailwind = self._detect_tailwind(html_all, asset_text)
+        has_shadcn = any(v in (html_all + asset_text) for v in SHADCN_VARS[:4])
 
-        # ── SvelteKit ───────────────────────────────────────────────────
-        if "sveltekit" in combined_html.lower() or "__sveltekit" in combined_html:
-            findings.append(Finding("SvelteKit", "SvelteKit framework detected", "medium"))
+        combo_count = sum([has_next, has_vercel, has_tailwind, has_shadcn])
+        if combo_count == 4:
+            F.append(Finding("Vibe Stack Combo",
+                             "Next.js + Vercel + TailwindCSS + shadcn/ui — the classic vibe-coding stack",
+                             Tier.STRONG, "All 4 components confirmed"))
+        elif combo_count == 3:
+            F.append(Finding("Likely Vibe Stack",
+                             f"{combo_count}/4 components of the classic vibe-coding stack detected",
+                             Tier.MODERATE))
 
-        if findings:
-            result.score = min(100, len(findings) * 18)
-        result.findings = findings
-        return result
+        return cat
 
-    def _check_content(self, pages: list[PageData]) -> CategoryResult:
-        result = CategoryResult("Content Signals", "📝")
-        findings = []
-        primary = pages[0]
+    # ================================================================
+    # 4. CONTENT SIGNALS
+    # ================================================================
 
-        # Aggregate text across all pages
+    def _check_content(self, pages):
+        cat = CategoryResult("Content Signals", "📝")
+        F = cat.findings
         all_text = " ".join(p.soup.get_text(separator=" ", strip=True).lower() for p in pages)
 
-        # ── Generic marketing phrases ───────────────────────────────────
-        phrase_hits = []
-        for pattern in self.GENERIC_PHRASES:
-            if re.search(pattern, all_text, re.IGNORECASE):
-                phrase_hits.append(pattern.replace(r"\b", "").replace("\\", ""))
-
-        if len(phrase_hits) >= 5:
-            findings.append(Finding(
-                "Generic AI Copy",
-                f"Found {len(phrase_hits)} generic marketing phrases typical of AI-generated copy",
-                "high",
-                ", ".join(phrase_hits[:5]),
-            ))
+        # Generic marketing phrases
+        phrase_hits = [p for p in GENERIC_PHRASES if re.search(p, all_text, re.IGNORECASE)]
+        if len(phrase_hits) >= 7:
+            F.append(Finding("Generic AI Copy",
+                             f"{len(phrase_hits)} generic marketing phrases — strongly suggests AI-generated copy",
+                             Tier.STRONG, ", ".join(phrase_hits[:5])))
+        elif len(phrase_hits) >= 4:
+            F.append(Finding("Generic Copy",
+                             f"{len(phrase_hits)} generic marketing phrases",
+                             Tier.MODERATE, ", ".join(phrase_hits[:4])))
         elif len(phrase_hits) >= 2:
-            findings.append(Finding(
-                "Generic Marketing Copy",
-                f"Found {len(phrase_hits)} generic marketing phrases",
-                "medium",
-                ", ".join(phrase_hits[:3]),
-            ))
+            F.append(Finding("Generic Copy",
+                             f"{len(phrase_hits)} generic phrases (common in AI and human marketing)",
+                             Tier.WEAK, ", ".join(phrase_hits[:3])))
 
-        # ── Generic CTAs (across all pages) ─────────────────────────────
+        # Generic CTAs
         cta_hits = []
         for page in pages:
             for el in page.soup.find_all(["a", "button"]):
                 el_text = el.get_text(strip=True).lower()
-                for cta in self.GENERIC_CTAS:
+                for cta in GENERIC_CTAS:
                     if cta in el_text:
                         cta_hits.append(cta)
                         break
+        if len(cta_hits) >= 8:
+            F.append(Finding("Generic CTAs",
+                             f"{len(cta_hits)} generic CTAs across {len(pages)} page(s)",
+                             Tier.MODERATE, ", ".join(sorted(set(cta_hits))[:5])))
+        elif len(cta_hits) >= 3:
+            F.append(Finding("Generic CTAs",
+                             f"{len(cta_hits)} generic CTAs", Tier.WEAK,
+                             ", ".join(sorted(set(cta_hits)))))
 
-        if len(cta_hits) >= 6:
-            findings.append(Finding(
-                "Generic CTAs",
-                f"Found {len(cta_hits)} generic call-to-action buttons/links across {len(pages)} page(s)",
-                "high",
-                ", ".join(sorted(set(cta_hits))[:5]),
-            ))
-        elif len(cta_hits) >= 2:
-            findings.append(Finding(
-                "Generic CTAs",
-                f"Found {len(cta_hits)} generic CTAs",
-                "medium",
-                ", ".join(sorted(set(cta_hits))),
-            ))
-
-        # ── Stock image CDNs ────────────────────────────────────────────
-        stock_domains = ["unsplash.com", "images.pexels.com", "placeholder.com", "placehold.co",
-                         "placekitten.com", "picsum.photos", "via.placeholder.com", "dummyimage.com"]
+        # Stock images
         stock_hits = []
         for page in pages:
             for img in page.soup.find_all("img"):
                 src = img.get("src", "") or img.get("data-src", "")
-                for domain in stock_domains:
+                for domain in STOCK_DOMAINS:
                     if domain in src:
                         stock_hits.append(domain)
                         break
         if stock_hits:
-            findings.append(Finding(
-                "Stock Images",
-                f"Found {len(stock_hits)} images from stock/placeholder services",
-                "medium",
-                ", ".join(sorted(set(stock_hits))),
-            ))
+            F.append(Finding("Stock Images",
+                             f"{len(stock_hits)} images from stock/placeholder services",
+                             Tier.MODERATE, ", ".join(sorted(set(stock_hits)))))
 
-        # ── Placeholder / Lorem Ipsum ───────────────────────────────────
+        # Lorem ipsum (STRONG — this is undeniable evidence of template/generated content)
         if "lorem ipsum" in all_text:
-            findings.append(Finding("Placeholder Text", "Lorem ipsum text detected", "high"))
+            F.append(Finding("Lorem Ipsum", "Lorem ipsum placeholder text found",
+                             Tier.STRONG))
+
+        # Placeholder company text
         if re.search(r"your (company|brand|product) (name|here)", all_text, re.IGNORECASE):
-            findings.append(Finding("Placeholder Text", "Placeholder company/brand text found", "high"))
+            F.append(Finding("Placeholder", "Unfilled placeholder text (company/brand name)",
+                             Tier.STRONG))
 
-        # ── Repetitive page content (same copy on different pages) ──────
-        if len(pages) >= 3:
-            page_texts = [p.soup.get_text(separator=" ", strip=True)[:500] for p in pages]
-            similar_count = 0
-            for i in range(1, len(page_texts)):
-                # Simple overlap check — same first 200 chars of body text
-                if page_texts[0][:200] == page_texts[i][:200]:
-                    similar_count += 1
-            if similar_count >= 2:
-                findings.append(Finding(
-                    "Duplicate Content",
-                    f"{similar_count + 1} pages share nearly identical content — suggests template generation",
-                    "medium",
-                ))
+        return cat
 
-        if findings:
-            high_count = sum(1 for f in findings if f.confidence == "high")
-            result.score = min(100, 15 + high_count * 22 + (len(findings) - high_count) * 10)
-        result.findings = findings
-        return result
+    # ================================================================
+    # 5. CODE QUALITY (replaces "Code Style")
+    # ================================================================
 
-    def _check_code_style(self, pages: list[PageData], asset_text: str) -> CategoryResult:
-        result = CategoryResult("Code Style Analysis", "🔬")
-        findings = []
+    def _check_code_quality(self, pages, asset_text):
+        cat = CategoryResult("Code Quality", "🔬")
+        F = cat.findings
+        html_all = "\n".join(p.html for p in pages)
 
-        combined_html = "\n".join(p.html for p in pages)
-        all_text = combined_html + "\n" + asset_text
+        # DOM nesting depth
+        max_depth = max((self._max_depth(p.soup.body) for p in pages if p.soup.body), default=0)
+        if max_depth > 18:
+            F.append(Finding("Excessive Nesting",
+                             f"DOM nesting depth: {max_depth} — usually indicates AI-generated markup",
+                             Tier.MODERATE, f"{max_depth} levels"))
+        elif max_depth > 12:
+            F.append(Finding("Deep Nesting",
+                             f"DOM nesting depth: {max_depth}",
+                             Tier.WEAK, f"{max_depth} levels"))
 
-        # ── DOM nesting depth (across all pages) ────────────────────────
-        max_depth = 0
-        for page in pages:
-            if page.soup.body:
-                d = self._max_nesting_depth(page.soup.body)
-                max_depth = max(max_depth, d)
-        if max_depth > 15:
-            findings.append(Finding("Deep Nesting",
-                                    f"Maximum DOM nesting depth: {max_depth} (excessive)",
-                                    "high", f"{max_depth} levels"))
-        elif max_depth > 10:
-            findings.append(Finding("Deep Nesting",
-                                    f"Maximum DOM nesting depth: {max_depth} (high)",
-                                    "medium", f"{max_depth} levels"))
+        # Tailwind
+        if self._detect_tailwind(html_all, asset_text):
+            # Count heavy utility elements
+            heavy = sum(
+                1 for p in pages for el in p.soup.find_all(True)
+                if isinstance(el.get("class"), list) and len(el.get("class", [])) > 10
+            )
+            if heavy > 30:
+                F.append(Finding("Utility Class Overload",
+                                 f"{heavy} elements with 10+ utility classes — possible AI-generated markup",
+                                 Tier.MODERATE, f"{heavy} elements"))
+            elif heavy > 10:
+                F.append(Finding("Heavy Tailwind",
+                                 f"{heavy} elements with 10+ utility classes",
+                                 Tier.WEAK, f"{heavy} elements"))
 
-        # ── Tailwind utility class density ──────────────────────────────
-        tailwind_heavy = 0
-        for page in pages:
-            for el in page.soup.find_all(True):
-                classes = el.get("class", [])
-                if isinstance(classes, list) and len(classes) > 8:
-                    tailwind_heavy += 1
-
-        if tailwind_heavy > 30:
-            findings.append(Finding(
-                "High Utility Density",
-                f"{tailwind_heavy} elements with 8+ utility classes across {len(pages)} page(s)",
-                "medium",
-                f"{tailwind_heavy} elements",
-            ))
-        elif tailwind_heavy > 15:
-            findings.append(Finding(
-                "Utility Density",
-                f"{tailwind_heavy} elements with 8+ utility classes",
-                "low",
-                f"{tailwind_heavy} elements",
-            ))
-
-        # ── TailwindCSS detection ───────────────────────────────────────
-        tw_indicators = 0
-        tw_classes = ["flex", "items-center", "justify-center", "rounded-lg", "px-4", "py-2",
-                      "bg-gradient-to-r", "text-sm", "font-medium", "space-y-", "gap-"]
-        for cls in tw_classes:
-            if f'"{cls}' in combined_html or f" {cls}" in combined_html:
-                tw_indicators += 1
-        if tw_indicators >= 6:
-            findings.append(Finding("TailwindCSS",
-                                    f"Strong TailwindCSS usage detected ({tw_indicators} indicator classes)",
-                                    "medium"))
-        elif tw_indicators >= 3:
-            findings.append(Finding("TailwindCSS", "Possible TailwindCSS usage", "low"))
-
-        # ── TailwindCSS in CSS assets ───────────────────────────────────
+        # TailwindCSS confirmation in CSS bundles
         if asset_text:
-            tw_asset_markers = ["tailwindcss", "--tw-", "tw-ring-offset", "tw-translate-x"]
-            tw_asset_hits = sum(1 for m in tw_asset_markers if m in asset_text)
-            if tw_asset_hits >= 2:
-                if not any(f.signal == "TailwindCSS" and f.confidence in ("medium", "high") for f in findings):
-                    findings.append(Finding("TailwindCSS",
-                                            "TailwindCSS confirmed in CSS bundles",
-                                            "medium", f"{tw_asset_hits} markers"))
+            tw_markers = ["tailwindcss", "--tw-", "tw-ring-offset", "tw-translate-x"]
+            if sum(1 for m in tw_markers if m in asset_text) >= 2:
+                F.append(Finding("TailwindCSS", "Confirmed via CSS bundle markers", Tier.WEAK))
 
-        # ── AI-style comments in source ─────────────────────────────────
-        comment_pattern = re.compile(
+        # AI-style comments
+        ai_comments = re.findall(
             r"<!--\s*(This (component|section|div|element)|Main (content|section|layout)|The following)",
-            re.IGNORECASE,
+            html_all, re.IGNORECASE,
         )
-        ai_comments = comment_pattern.findall(combined_html)
-        if len(ai_comments) >= 3:
-            findings.append(Finding(
-                "AI-Style Comments",
-                f"Found {len(ai_comments)} overly descriptive HTML comments typical of AI generation",
-                "medium",
-            ))
+        if len(ai_comments) >= 5:
+            F.append(Finding("AI Comments",
+                             f"{len(ai_comments)} overly descriptive HTML comments — strong AI generation pattern",
+                             Tier.MODERATE))
+        elif len(ai_comments) >= 2:
+            F.append(Finding("AI Comments",
+                             f"{len(ai_comments)} verbose HTML comments",
+                             Tier.WEAK))
 
-        # ── Inline event handlers ───────────────────────────────────────
-        inline_count = 0
+        # ── Repetitive DOM structure (NEW) ─────────────────────────────
+        self._check_repetitive_structures(pages, F)
+
+        return cat
+
+    def _check_repetitive_structures(self, pages, findings):
+        """Detect if multiple sections have nearly identical DOM structure — AI generates repetitive patterns."""
         for page in pages:
-            inline_count += len(page.soup.find_all(
-                attrs=lambda a: a and any(k.startswith("on") for k in a)
-            ))
-        if inline_count > 5:
-            findings.append(Finding(
-                "Inline Handlers",
-                f"{inline_count} inline event handlers across {len(pages)} page(s)",
-                "low",
-            ))
+            sections = page.soup.find_all("section")
+            if len(sections) < 3:
+                continue
 
-        if findings:
-            result.score = min(100, len(findings) * 18)
-        result.findings = findings
-        return result
+            # Get structural fingerprint for each section (tag sequence)
+            fingerprints = []
+            for sec in sections:
+                children_tags = []
+                for child in sec.descendants:
+                    if hasattr(child, "name") and child.name:
+                        children_tags.append(child.name)
+                # Fingerprint = first 20 tags in order
+                fp = tuple(children_tags[:20])
+                if len(fp) >= 5:
+                    fingerprints.append(fp)
 
-    def _check_deployment(self, pages: list[PageData], base_origin: str) -> CategoryResult:
-        result = CategoryResult("Deployment Signals", "🚀")
-        findings = []
+            # Check for repeats
+            fp_counter = Counter(fingerprints)
+            most_common = fp_counter.most_common(1)
+            if most_common and most_common[0][1] >= 3:
+                count = most_common[0][1]
+                findings.append(Finding("Repetitive Sections",
+                                        f"{count} sections with identical DOM structure — AI tends to repeat patterns",
+                                        Tier.MODERATE, f"{count} matching sections"))
+            break  # Only check primary page
 
-        primary = pages[0]
-        headers = primary.headers
-        parsed = primary.parsed
+    # ================================================================
+    # 6. DEPLOYMENT SIGNALS
+    # ================================================================
 
-        # ── Vercel ──────────────────────────────────────────────────────
-        vercel_headers = [k for k in headers if k.lower().startswith("x-vercel")]
-        if vercel_headers or ".vercel.app" in parsed.netloc:
-            findings.append(Finding("Vercel", "Deployed on Vercel", "medium",
-                                    ", ".join(vercel_headers[:3])))
+    def _check_deployment(self, pages, base_origin):
+        cat = CategoryResult("Deployment Signals", "🚀")
+        F = cat.findings
+        headers = pages[0].headers
+        parsed = pages[0].parsed
 
-        # ── Netlify ─────────────────────────────────────────────────────
-        netlify_headers = [k for k in headers if k.lower().startswith("x-nf")]
-        if netlify_headers or ".netlify.app" in parsed.netloc:
-            findings.append(Finding("Netlify", "Deployed on Netlify", "medium"))
-
-        # ── Cloudflare Pages ────────────────────────────────────────────
+        # These are WEAK signals — being on Vercel doesn't mean vibe-coded
+        if any(k.lower().startswith("x-vercel") for k in headers) or ".vercel.app" in parsed.netloc:
+            F.append(Finding("Vercel", "Deployed on Vercel",
+                             Tier.WEAK, "Many legitimate sites use Vercel"))
+        if any(k.lower().startswith("x-nf") for k in headers) or ".netlify.app" in parsed.netloc:
+            F.append(Finding("Netlify", "Deployed on Netlify", Tier.WEAK))
         if ".pages.dev" in parsed.netloc:
-            findings.append(Finding("Cloudflare Pages", "Deployed on Cloudflare Pages", "low"))
-
-        # ── Railway ─────────────────────────────────────────────────────
+            F.append(Finding("Cloudflare Pages", "Deployed on Cloudflare Pages", Tier.WEAK))
         if ".railway.app" in parsed.netloc:
-            findings.append(Finding("Railway", "Deployed on Railway", "medium"))
-
-        # ── Render ──────────────────────────────────────────────────────
+            F.append(Finding("Railway", "Deployed on Railway", Tier.WEAK))
         if ".onrender.com" in parsed.netloc:
-            findings.append(Finding("Render", "Deployed on Render", "medium"))
+            F.append(Finding("Render", "Deployed on Render", Tier.WEAK))
 
-        # ── Check for missing basics ────────────────────────────────────
+        # Missing basics
         try:
-            robots = requests.get(f"{base_origin}/robots.txt", headers=REQUEST_HEADERS, timeout=5)
-            if robots.status_code == 404:
-                findings.append(Finding("No robots.txt",
-                                        "Missing robots.txt — common in quickly deployed vibe projects", "low"))
+            r = requests.get(f"{base_origin}/robots.txt", headers=REQUEST_HEADERS, timeout=5)
+            if r.status_code == 404:
+                F.append(Finding("No robots.txt", "Missing robots.txt", Tier.WEAK))
+        except Exception:
+            pass
+        try:
+            r = requests.get(f"{base_origin}/sitemap.xml", headers=REQUEST_HEADERS, timeout=5)
+            if r.status_code == 404:
+                F.append(Finding("No sitemap", "Missing sitemap.xml", Tier.WEAK))
         except Exception:
             pass
 
-        try:
-            sitemap = requests.get(f"{base_origin}/sitemap.xml", headers=REQUEST_HEADERS, timeout=5)
-            if sitemap.status_code == 404:
-                findings.append(Finding("No sitemap", "Missing sitemap.xml", "low"))
-        except Exception:
-            pass
+        return cat
 
-        if findings:
-            high_count = sum(1 for f in findings if f.confidence == "high")
-            result.score = min(100, 10 + high_count * 25 + (len(findings) - high_count) * 12)
-        result.findings = findings
-        return result
+    # ================================================================
+    # 7. DESIGN PATTERNS
+    # ================================================================
 
-    def _check_design_patterns(self, pages: list[PageData], asset_text: str) -> CategoryResult:
-        result = CategoryResult("Design Pattern Analysis", "🎨")
-        findings = []
+    def _check_design_patterns(self, pages, asset_text):
+        cat = CategoryResult("Design Patterns", "🎨")
+        F = cat.findings
+        html_all = "\n".join(p.html for p in pages)
+        all_text = html_all + "\n" + asset_text
 
-        combined_html = "\n".join(p.html for p in pages)
-        all_text = combined_html + "\n" + asset_text
-
-        # ── Glassmorphism / Backdrop blur ───────────────────────────────
+        # Glassmorphism
         if "backdrop-filter" in all_text or "backdrop-blur" in all_text:
-            findings.append(Finding("Glassmorphism",
-                                    "Backdrop blur / glassmorphism effects detected", "medium"))
+            F.append(Finding("Glassmorphism", "Backdrop blur / glassmorphism effects", Tier.WEAK))
 
-        # ── Gradient backgrounds ────────────────────────────────────────
-        gradient_count = len(re.findall(r"(bg-gradient-to-|linear-gradient|radial-gradient)", all_text))
-        if gradient_count >= 8:
-            findings.append(Finding("Heavy Gradients",
-                                    f"Found {gradient_count} gradient references — AI loves gradients",
-                                    "medium"))
-        elif gradient_count >= 3:
-            findings.append(Finding("Gradients", f"Found {gradient_count} gradient references", "low"))
+        # Gradients
+        g_count = len(re.findall(r"(bg-gradient-to-|linear-gradient|radial-gradient)", all_text))
+        if g_count >= 10:
+            F.append(Finding("Heavy Gradients", f"{g_count} gradient references", Tier.WEAK))
 
-        # ── Cookie-cutter section layout ────────────────────────────────
-        all_section_names = []
-        for page in pages:
-            for s in page.soup.find_all(["section", "div"], id=True):
-                all_section_names.append(s.get("id", "").lower())
-            for s in page.soup.find_all(["section", "div"], class_=True):
-                all_section_names.extend([c.lower() for c in (s.get("class") or [])])
+        # Cookie-cutter layout
+        section_names = []
+        for p in pages:
+            for s in p.soup.find_all(["section", "div"], id=True):
+                section_names.append(s.get("id", "").lower())
+            for s in p.soup.find_all(["section", "div"], class_=True):
+                section_names.extend(c.lower() for c in (s.get("class") or []))
 
-        template_hits = sum(1 for name in self.TEMPLATE_SECTION_NAMES if name in all_section_names)
-        if template_hits >= 4:
-            findings.append(Finding(
-                "Template Layout",
-                f"Found {template_hits}/7 cookie-cutter sections (hero, features, testimonials, …)",
-                "high",
-            ))
-        elif template_hits >= 2:
-            findings.append(Finding(
-                "Template Layout",
-                f"Found {template_hits} template-style section names",
-                "medium",
-            ))
+        template_hits = sum(1 for t in TEMPLATE_SECTIONS if t in section_names)
+        if template_hits >= 5:
+            F.append(Finding("Template Layout",
+                             f"{template_hits}/7 cookie-cutter sections (hero → features → testimonials → …)",
+                             Tier.MODERATE))
+        elif template_hits >= 3:
+            F.append(Finding("Template Layout",
+                             f"{template_hits} template-style section names",
+                             Tier.WEAK))
 
-        # ── Card grid patterns ──────────────────────────────────────────
-        card_count = 0
-        for page in pages:
-            card_count += len(page.soup.find_all(class_=re.compile(r"card", re.IGNORECASE)))
-        if card_count >= 8:
-            findings.append(Finding("Card Grid",
-                                    f"Found {card_count} card components across {len(pages)} page(s)",
-                                    "medium"))
-        elif card_count >= 4:
-            findings.append(Finding("Card Grid", f"Found {card_count} card components", "low"))
+        # Card grid
+        card_count = sum(len(p.soup.find_all(class_=re.compile(r"card", re.IGNORECASE))) for p in pages)
+        if card_count >= 9:
+            F.append(Finding("Card Grid", f"{card_count} card components", Tier.WEAK))
 
-        # ── Dark mode default ───────────────────────────────────────────
-        html_tag = pages[0].soup.find("html")
-        if html_tag and "dark" in " ".join(html_tag.get("class", [])):
-            findings.append(Finding("Dark Mode Default", "Page defaults to dark mode", "low"))
+        return cat
 
-        body_tag = pages[0].soup.find("body")
-        if body_tag:
-            body_info = (body_tag.get("style", "") + " ".join(body_tag.get("class", []))).lower()
-            if any(d in body_info for d in ["bg-gray-9", "bg-black", "bg-slate-9",
-                                             "bg-zinc-9", "bg-neutral-9"]):
-                findings.append(Finding("Dark Theme", "Dark background detected on body", "low"))
+    # ================================================================
+    # 8. ACCESSIBILITY AUDIT (NEW)
+    # ================================================================
 
-        # ── Neon / glow effects ─────────────────────────────────────────
-        if re.search(r"(shadow-.*glow|neon|text-shadow.*#|box-shadow.*0\s+0\s+\d+px\s+\d+px)",
-                     all_text, re.IGNORECASE):
-            findings.append(Finding("Glow Effects",
-                                    "Neon/glow effects detected — popular in AI-generated designs",
-                                    "low"))
+    def _check_accessibility(self, pages):
+        cat = CategoryResult("Accessibility", "♿")
+        F = cat.findings
 
-        # ── Animated elements ───────────────────────────────────────────
-        animations = re.findall(r"(animate-|@keyframes|transition-all|framer-motion|motion\.div)",
-                                all_text)
-        if len(animations) >= 8:
-            findings.append(Finding("Heavy Animations",
-                                    f"Found {len(animations)} animation references", "low"))
+        total_imgs = 0
+        missing_alt = 0
+        empty_alt = 0
+        for p in pages:
+            imgs = p.soup.find_all("img")
+            total_imgs += len(imgs)
+            for img in imgs:
+                alt = img.get("alt")
+                if alt is None:
+                    missing_alt += 1
+                elif alt.strip() == "":
+                    empty_alt += 1
 
-        if findings:
-            high_count = sum(1 for f in findings if f.confidence == "high")
-            result.score = min(100, 10 + high_count * 25 + (len(findings) - high_count) * 10)
-        result.findings = findings
-        return result
+        if total_imgs > 0:
+            missing_pct = (missing_alt / total_imgs) * 100
+            if missing_pct >= 50 and missing_alt >= 3:
+                F.append(Finding("Missing Alt Text",
+                                 f"{missing_alt}/{total_imgs} images missing alt attribute "
+                                 f"({missing_pct:.0f}%) — AI-generated code often skips accessibility",
+                                 Tier.MODERATE, f"{missing_alt} missing"))
+            elif missing_alt >= 1:
+                F.append(Finding("Missing Alt Text",
+                                 f"{missing_alt} image(s) missing alt text",
+                                 Tier.WEAK))
+
+        # Heading hierarchy
+        for p in pages:
+            headings = p.soup.find_all(re.compile(r"h[1-6]"))
+            if not headings:
+                continue
+            levels = [int(h.name[1]) for h in headings]
+            # Check for skipped levels (h1 → h3 without h2)
+            skips = 0
+            for i in range(1, len(levels)):
+                if levels[i] > levels[i - 1] + 1:
+                    skips += 1
+            if skips >= 2:
+                F.append(Finding("Heading Hierarchy",
+                                 f"{skips} heading level skips — AI often generates inconsistent headings",
+                                 Tier.WEAK))
+            # Multiple h1s
+            h1_count = levels.count(1)
+            if h1_count > 1:
+                F.append(Finding("Multiple H1s",
+                                 f"{h1_count} H1 tags on a single page — suggests auto-generated structure",
+                                 Tier.WEAK))
+            break  # Check primary page only
+
+        # Missing ARIA landmarks
+        landmarks = pages[0].soup.find_all(attrs={"role": True})
+        nav_elements = pages[0].soup.find_all("nav")
+        main_elements = pages[0].soup.find_all("main")
+        if not landmarks and not nav_elements and not main_elements:
+            F.append(Finding("No ARIA/Landmarks",
+                             "No ARIA roles or semantic landmarks — vibe-coded sites typically skip accessibility",
+                             Tier.WEAK))
+
+        # Empty links/buttons
+        empty_interactive = 0
+        for p in pages:
+            for el in p.soup.find_all(["a", "button"]):
+                text = el.get_text(strip=True)
+                aria = el.get("aria-label", "")
+                title = el.get("title", "")
+                if not text and not aria and not title:
+                    empty_interactive += 1
+        if empty_interactive >= 3:
+            F.append(Finding("Empty Interactive Elements",
+                             f"{empty_interactive} links/buttons with no accessible text",
+                             Tier.WEAK))
+
+        return cat
+
+    # ================================================================
+    # 9. SEO QUALITY (NEW)
+    # ================================================================
+
+    def _check_seo(self, pages):
+        cat = CategoryResult("SEO Quality", "🔍")
+        F = cat.findings
+        primary = pages[0]
+
+        # Meta description
+        meta_desc = primary.soup.find("meta", attrs={"name": "description"})
+        if not meta_desc or not (meta_desc.get("content") or "").strip():
+            F.append(Finding("No Meta Description",
+                             "Missing meta description — AI-generated sites often skip SEO basics",
+                             Tier.WEAK))
+
+        # Open Graph tags
+        og_tags = primary.soup.find_all("meta", attrs={"property": re.compile(r"^og:")})
+        if not og_tags:
+            F.append(Finding("No Open Graph",
+                             "No Open Graph tags — social sharing will show no preview",
+                             Tier.WEAK))
+
+        # Title tag
+        title = primary.soup.find("title")
+        if not title or not title.get_text(strip=True):
+            F.append(Finding("No Title Tag",
+                             "Missing or empty <title> tag",
+                             Tier.WEAK))
+        elif title:
+            title_text = title.get_text(strip=True).lower()
+            generic_titles = ["home", "welcome", "untitled", "my app", "my site", "my website",
+                              "create next app", "vite app", "vite + react"]
+            if any(t == title_text or title_text.startswith(t) for t in generic_titles):
+                F.append(Finding("Generic Title",
+                                 f"Page title is generic: '{title.get_text(strip=True)}'",
+                                 Tier.MODERATE, title.get_text(strip=True)))
+
+        # Favicon
+        favicon = primary.soup.find("link", rel=lambda r: r and "icon" in r)
+        if not favicon:
+            F.append(Finding("No Favicon",
+                             "No favicon defined — common in quickly scaffolded AI projects",
+                             Tier.WEAK))
+
+        # Lang attribute
+        html_tag = primary.soup.find("html")
+        if html_tag and not html_tag.get("lang"):
+            F.append(Finding("No Lang Attribute",
+                             "HTML tag missing lang attribute",
+                             Tier.WEAK))
+
+        return cat
 
     # ================================================================
     # Helpers
     # ================================================================
 
-    def _max_nesting_depth(self, element, depth: int = 0) -> int:
-        """Recursively find maximum DOM nesting depth."""
-        if not hasattr(element, "children"):
-            return depth
-        max_d = depth
-        for child in element.children:
-            if hasattr(child, "name") and child.name:
-                max_d = max(max_d, self._max_nesting_depth(child, depth + 1))
-        return max_d
+    def _max_depth(self, el, d=0):
+        if not hasattr(el, "children"):
+            return d
+        mx = d
+        for c in el.children:
+            if hasattr(c, "name") and c.name:
+                mx = max(mx, self._max_depth(c, d + 1))
+        return mx
 
     @staticmethod
-    def _page_label(page: PageData, primary: PageData) -> str:
-        """Return a short label for a page (empty for primary)."""
-        if page.url == primary.url:
-            return ""
-        path = page.parsed.path or "/"
-        return path if len(path) <= 40 else path[:37] + "…"
+    def _detect_tailwind(html, asset_text):
+        """Returns True if TailwindCSS is detected."""
+        tw_classes = ["flex", "items-center", "justify-center", "rounded-lg",
+                      "px-4", "py-2", "bg-gradient-to-r", "text-sm", "font-medium"]
+        hits = sum(1 for c in tw_classes if f" {c}" in html or f'"{c}' in html)
+        if hits >= 5:
+            return True
+        if asset_text:
+            return any(m in asset_text for m in ["tailwindcss", "--tw-", "tw-ring-offset"])
+        return False
 
     @staticmethod
-    def _get_verdict(score: int) -> tuple:
+    def _get_verdict(score):
         if score >= 76:
             return "Almost Certainly Vibe Coded", "🔴"
         elif score >= 51:

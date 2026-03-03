@@ -1,6 +1,6 @@
 /**
  * VibeCheck — Frontend Logic
- * Handles form submission, API calls, loading animation, and results rendering.
+ * Evidence-based scoring: every point is backed by a verifiable finding.
  */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -22,8 +22,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const verdictEmoji = document.getElementById("verdictEmoji");
     const verdictText = document.getElementById("verdictText");
     const verdictUrl = document.getElementById("verdictUrl");
-    const categoriesGrid = document.getElementById("categoriesGrid");
     const scanStats = document.getElementById("scanStats");
+    const evidenceSummary = document.getElementById("evidenceSummary");
+    const categoriesGrid = document.getElementById("categoriesGrid");
     const errorMessage = document.getElementById("errorMessage");
 
     const tryAnotherBtn = document.getElementById("tryAnotherBtn");
@@ -31,8 +32,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // ── Background particles ────────────────────────────────────────
     createParticles();
-
-    // ── Add SVG gradient definition for gauge ───────────────────────
     addGaugeGradient();
 
     // ── Event listeners ─────────────────────────────────────────────
@@ -58,12 +57,10 @@ document.addEventListener("DOMContentLoaded", () => {
             });
 
             const data = await response.json();
-
             if (!response.ok || data.error) {
                 throw new Error(data.error || "Unknown error occurred");
             }
 
-            // Wait for loading animation to feel natural
             await sleep(800);
             showSection("results");
             renderResults(data);
@@ -75,7 +72,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // ── Section visibility ──────────────────────────────────────────
     function showSection(name) {
         heroSection.style.display = name === "hero" ? "" : "none";
         loadingSection.style.display = name === "loading" ? "" : "none";
@@ -89,23 +85,17 @@ document.addEventListener("DOMContentLoaded", () => {
         urlInput.select();
     }
 
-    // ── Button state ────────────────────────────────────────────────
     function setButtonLoading(loading) {
         analyzeBtn.disabled = loading;
         btnText.style.display = loading ? "none" : "";
         btnLoader.style.display = loading ? "" : "none";
     }
 
-    // ── Loading animation ───────────────────────────────────────────
     function animateLoadingSteps() {
         const steps = Array.from(loadingSteps);
-        steps.forEach((s) => {
-            s.classList.remove("active", "done");
-        });
-
+        steps.forEach((s) => s.classList.remove("active", "done"));
         let i = 0;
         steps[0].classList.add("active");
-
         const interval = setInterval(() => {
             if (i < steps.length) {
                 steps[i].classList.remove("active");
@@ -122,18 +112,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // ── Render results ──────────────────────────────────────────────
     function renderResults(data) {
-        // Animate score number
+        // Score
         animateCounter(scoreNumber, data.overall_score, 1500);
-
-        // Animate gauge
-        const circumference = 2 * Math.PI * 85; // ~534
+        const circumference = 2 * Math.PI * 85;
         const offset = circumference - (data.overall_score / 100) * circumference;
         gaugeFill.style.strokeDashoffset = offset;
-
-        // Update gradient colours based on score
         updateGaugeColor(data.overall_score);
-
-        // Score number colour
         scoreNumber.style.color = getScoreColor(data.overall_score);
 
         // Verdict
@@ -147,16 +131,15 @@ document.addEventListener("DOMContentLoaded", () => {
             <span class="stat-chip">📦 ${data.assets_analyzed} asset${data.assets_analyzed > 1 ? "s" : ""} scanned</span>
         `;
 
-        // Categories
+        // ── Evidence Summary ────────────────────────────────────────
+        renderEvidenceSummary(data.evidence_summary, data.overall_score);
+
+        // ── Categories ──────────────────────────────────────────────
         categoriesGrid.innerHTML = "";
         const orderedCategories = [
-            "ai_platforms",
-            "ui_libraries",
-            "frameworks",
-            "content",
-            "code_style",
-            "deployment",
-            "design_patterns",
+            "ai_platforms", "ui_libraries", "frameworks", "content",
+            "code_quality", "deployment", "design_patterns",
+            "accessibility", "seo_quality",
         ];
 
         orderedCategories.forEach((key) => {
@@ -165,7 +148,6 @@ document.addEventListener("DOMContentLoaded", () => {
             categoriesGrid.appendChild(createCategoryCard(cat));
         });
 
-        // Animate progress bars after render
         requestAnimationFrame(() => {
             document.querySelectorAll(".category-progress-fill").forEach((bar) => {
                 bar.style.width = bar.dataset.width;
@@ -173,10 +155,55 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    // ── Evidence Summary ────────────────────────────────────────────
+    function renderEvidenceSummary(summary, score) {
+        if (!summary) {
+            evidenceSummary.innerHTML = "";
+            return;
+        }
+
+        const tiers = [
+            { key: "definitive", icon: "🎯", color: "#ef4444", bgColor: "rgba(239,68,68,0.1)", borderColor: "rgba(239,68,68,0.3)" },
+            { key: "strong", icon: "🔥", color: "#f97316", bgColor: "rgba(249,115,22,0.1)", borderColor: "rgba(249,115,22,0.3)" },
+            { key: "moderate", icon: "📊", color: "#f59e0b", bgColor: "rgba(245,158,11,0.1)", borderColor: "rgba(245,158,11,0.3)" },
+            { key: "weak", icon: "💨", color: "#6b7280", bgColor: "rgba(107,114,128,0.1)", borderColor: "rgba(107,114,128,0.3)" },
+        ];
+
+        let html = `
+            <div class="evidence-header">
+                <h3>📋 Evidence Breakdown</h3>
+                <p class="evidence-subtitle">Score computed from ${Object.values(summary).reduce((a, b) => a + b.count, 0)} findings across 4 evidence tiers. Weak signals are capped to prevent score inflation.</p>
+            </div>
+            <div class="evidence-tiers">
+        `;
+
+        tiers.forEach(({ key, icon, color, bgColor, borderColor }) => {
+            const tier = summary[key];
+            if (!tier) return;
+            const wasCapped = tier.raw_points > tier.capped_points;
+            html += `
+                <div class="evidence-tier-card" style="border-color: ${borderColor}; background: ${bgColor}">
+                    <div class="tier-top">
+                        <span class="tier-icon">${icon}</span>
+                        <span class="tier-label" style="color: ${color}">${tier.label}</span>
+                    </div>
+                    <div class="tier-count">${tier.count}</div>
+                    <div class="tier-detail">finding${tier.count !== 1 ? "s" : ""}</div>
+                    <div class="tier-points" style="color: ${color}">
+                        +${tier.capped_points} pts${wasCapped ? ` <span class="tier-capped">(capped from ${tier.raw_points})</span>` : ""}
+                    </div>
+                </div>
+            `;
+        });
+
+        html += `</div>`;
+        evidenceSummary.innerHTML = html;
+    }
+
+    // ── Category Card ───────────────────────────────────────────────
     function createCategoryCard(cat) {
         const card = document.createElement("div");
         card.className = "category-card";
-
         const scoreClass = getScoreClass(cat.score);
         const fillClass = "fill-" + scoreClass.replace("score-", "");
 
@@ -198,7 +225,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     .map(
                         (f) => `
                         <div class="finding-item">
-                            <span class="finding-badge confidence-${f.confidence}">${f.confidence}</span>
+                            <span class="finding-badge tier-${f.tier}">${f.tier_label}</span>
+                            <span class="finding-points">+${f.points}</span>
                             <span>${escapeHtml(f.description)}${f.evidence ? ` <span style="color:var(--text-muted)">(${escapeHtml(f.evidence)})</span>` : ""}${f.page ? ` <span style="color:var(--text-muted);font-size:0.72rem">on ${escapeHtml(f.page)}</span>` : ""}</span>
                         </div>
                     `
@@ -227,44 +255,32 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function updateGaugeColor(score) {
-        const grad = document.getElementById("gaugeGradientStop1");
-        const grad2 = document.getElementById("gaugeGradientStop2");
-        if (!grad || !grad2) return;
-
+        const g1 = document.getElementById("gaugeGradientStop1");
+        const g2 = document.getElementById("gaugeGradientStop2");
+        if (!g1 || !g2) return;
         if (score >= 75) {
-            grad.setAttribute("stop-color", "#ef4444");
-            grad2.setAttribute("stop-color", "#f97316");
+            g1.setAttribute("stop-color", "#ef4444");
+            g2.setAttribute("stop-color", "#f97316");
         } else if (score >= 50) {
-            grad.setAttribute("stop-color", "#f97316");
-            grad2.setAttribute("stop-color", "#f59e0b");
+            g1.setAttribute("stop-color", "#f97316");
+            g2.setAttribute("stop-color", "#f59e0b");
         } else if (score >= 25) {
-            grad.setAttribute("stop-color", "#f59e0b");
-            grad2.setAttribute("stop-color", "#eab308");
+            g1.setAttribute("stop-color", "#f59e0b");
+            g2.setAttribute("stop-color", "#eab308");
         } else {
-            grad.setAttribute("stop-color", "#22c55e");
-            grad2.setAttribute("stop-color", "#4ade80");
+            g1.setAttribute("stop-color", "#22c55e");
+            g2.setAttribute("stop-color", "#4ade80");
         }
     }
 
     function animateCounter(element, target, duration) {
-        const start = 0;
         const startTime = performance.now();
-
         function update(currentTime) {
-            const elapsed = currentTime - startTime;
-            const progress = Math.min(elapsed / duration, 1);
-
-            // Ease out cubic
+            const progress = Math.min((currentTime - startTime) / duration, 1);
             const eased = 1 - Math.pow(1 - progress, 3);
-            const current = Math.round(start + (target - start) * eased);
-
-            element.textContent = current;
-
-            if (progress < 1) {
-                requestAnimationFrame(update);
-            }
+            element.textContent = Math.round(target * eased);
+            if (progress < 1) requestAnimationFrame(update);
         }
-
         requestAnimationFrame(update);
     }
 
@@ -275,32 +291,27 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function sleep(ms) {
-        return new Promise((resolve) => setTimeout(resolve, ms));
+        return new Promise((r) => setTimeout(r, ms));
     }
 
-    // ── Background particles ────────────────────────────────────────
     function createParticles() {
         const container = document.getElementById("bgParticles");
-        const count = 25;
-
-        for (let i = 0; i < count; i++) {
-            const particle = document.createElement("div");
-            particle.className = "particle";
-            const size = Math.random() * 4 + 2;
-            particle.style.width = `${size}px`;
-            particle.style.height = `${size}px`;
-            particle.style.left = `${Math.random() * 100}%`;
-            particle.style.animationDuration = `${Math.random() * 15 + 10}s`;
-            particle.style.animationDelay = `${Math.random() * 10}s`;
-            container.appendChild(particle);
+        for (let i = 0; i < 25; i++) {
+            const p = document.createElement("div");
+            p.className = "particle";
+            const s = Math.random() * 4 + 2;
+            p.style.width = `${s}px`;
+            p.style.height = `${s}px`;
+            p.style.left = `${Math.random() * 100}%`;
+            p.style.animationDuration = `${Math.random() * 15 + 10}s`;
+            p.style.animationDelay = `${Math.random() * 10}s`;
+            container.appendChild(p);
         }
     }
 
-    // ── SVG gradient for gauge ──────────────────────────────────────
     function addGaugeGradient() {
         const svg = document.querySelector(".gauge-svg");
         if (!svg) return;
-
         const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
         defs.innerHTML = `
             <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
