@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeCheck — Detect Vibe-Coded Websites</title>
+    <meta name="description" content="Analyze any website to detect if it was built using AI-assisted vibe coding tools like v0, Bolt, Cursor, or Lovable.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <!-- ── Animated background particles ────────────────────────── -->
+    <div class="bg-particles" id="bgParticles"></div>
+
+    <!-- ── Header ───────────────────────────────────────────────── -->
+    <header class="site-header">
+        <div class="header-inner">
+            <a href="/" class="logo">
+                <span class="logo-icon">⚡</span>
+                <span class="logo-text">VibeCheck</span>
+            </a>
+            <nav class="header-nav">
+                <a href="https://github.com" target="_blank" class="nav-link">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- ── Main content ─────────────────────────────────────────── -->
+    <main>
+        <!-- Hero / Input section -->
+        <section class="hero" id="hero">
+            <div class="hero-badge">
+                <span class="badge-dot"></span>
+                AI-Powered Analysis Engine
+            </div>
+            <h1 class="hero-title">
+                Was this site <span class="gradient-text">vibe coded</span>?
+            </h1>
+            <p class="hero-subtitle">
+                Paste any URL and our engine scans for telltale signs of AI-assisted code generation — from framework fingerprints to generic copy patterns.
+            </p>
+
+            <form class="url-form" id="urlForm">
+                <div class="input-wrapper">
+                    <div class="input-icon">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"/>
+                            <path d="m21 21-4.3-4.3"/>
+                        </svg>
+                    </div>
+                    <input
+                        type="text"
+                        id="urlInput"
+                        placeholder="Enter a URL to analyze… e.g. https://example.com"
+                        autocomplete="off"
+                        spellcheck="false"
+                        required
+                    >
+                    <button type="submit" class="analyze-btn" id="analyzeBtn">
+                        <span class="btn-text">Analyze</span>
+                        <span class="btn-loader" style="display:none">
+                            <svg class="spinner" viewBox="0 0 24 24" width="20" height="20">
+                                <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="31.4 31.4" stroke-linecap="round"/>
+                            </svg>
+                        </span>
+                    </button>
+                </div>
+                <p class="input-hint">We'll fetch the page and run 7 detection categories against it.</p>
+            </form>
+        </section>
+
+        <!-- Loading state -->
+        <section class="loading-section" id="loadingSection" style="display:none">
+            <div class="scanner-animation">
+                <div class="scanner-ring ring-1"></div>
+                <div class="scanner-ring ring-2"></div>
+                <div class="scanner-ring ring-3"></div>
+                <div class="scanner-core">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                </div>
+            </div>
+            <p class="loading-text">Scanning website for vibe coding signals…</p>
+            <div class="loading-steps" id="loadingSteps">
+                <div class="step active">Fetching page content</div>
+                <div class="step">Analyzing AI platform signatures</div>
+                <div class="step">Checking UI library patterns</div>
+                <div class="step">Evaluating content signals</div>
+                <div class="step">Computing vibe score</div>
+            </div>
+        </section>
+
+        <!-- Results Dashboard -->
+        <section class="results-section" id="resultsSection" style="display:none">
+            <!-- Score header -->
+            <div class="results-header" id="resultsHeader">
+                <div class="score-gauge-container">
+                    <div class="score-gauge" id="scoreGauge">
+                        <svg viewBox="0 0 200 200" class="gauge-svg">
+                            <circle cx="100" cy="100" r="85" class="gauge-bg"/>
+                            <circle cx="100" cy="100" r="85" class="gauge-fill" id="gaugeFill"
+                                    stroke-dasharray="534" stroke-dashoffset="534"/>
+                        </svg>
+                        <div class="gauge-center">
+                            <span class="score-number" id="scoreNumber">0</span>
+                            <span class="score-label">/ 100</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="verdict-container">
+                    <span class="verdict-emoji" id="verdictEmoji">🟢</span>
+                    <h2 class="verdict-text" id="verdictText">Analyzing…</h2>
+                    <p class="verdict-url" id="verdictUrl"></p>
+                </div>
+            </div>
+
+            <!-- Category breakdown -->
+            <div class="categories-grid" id="categoriesGrid">
+                <!-- Populated by JS -->
+            </div>
+
+            <!-- Analyze another -->
+            <div class="try-another">
+                <button class="try-another-btn" id="tryAnotherBtn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+                        <path d="M21 3v5h-5"/>
+                    </svg>
+                    Analyze Another Site
+                </button>
+            </div>
+        </section>
+
+        <!-- Error state -->
+        <section class="error-section" id="errorSection" style="display:none">
+            <div class="error-card">
+                <div class="error-icon">⚠️</div>
+                <h3 class="error-title">Analysis Failed</h3>
+                <p class="error-message" id="errorMessage"></p>
+                <button class="try-another-btn" id="errorRetryBtn">Try Again</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- ── Footer ───────────────────────────────────────────────── -->
+    <footer class="site-footer">
+        <p>Built with curiosity. VibeCheck uses heuristic analysis — results are indicative, not definitive.</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
