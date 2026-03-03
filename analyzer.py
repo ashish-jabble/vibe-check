@@ -303,8 +303,10 @@ class VibeCodingAnalyzer:
     # ================================================================
 
     def _fetch_page(self, url, is_primary=False):
-        """Fetch a page. If is_primary, retry with alternate headers and return error string on failure."""
+        """Fetch a page. Uses requests first, falls back to headless browser for protected sites."""
         last_error = None
+        needs_browser = False
+
         for attempt in range(2):
             headers = dict(REQUEST_HEADERS)
             if attempt == 1:
@@ -317,10 +319,13 @@ class VibeCodingAnalyzer:
                                 BeautifulSoup(resp.text, "lxml"))
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
-                # On 403, retry with alternate UA before giving up
                 if status == 403 and attempt == 0:
                     last_error = status
                     continue
+                if status in (403, 401):
+                    needs_browser = True
+                    last_error = status
+                    break
                 if is_primary:
                     msg = HTTP_ERROR_MESSAGES.get(
                         status,
@@ -329,19 +334,19 @@ class VibeCodingAnalyzer:
                     return msg
                 return None
             except requests.exceptions.Timeout:
-                if is_primary and attempt == 1:
-                    return "Request timed out. The site took too long to respond."
+                if attempt == 1:
+                    needs_browser = True
+                    last_error = "timeout"
+                    break
                 last_error = "timeout"
                 continue
             except requests.exceptions.ConnectionError as exc:
                 err_str = str(exc).lower()
+                if "connection reset" in err_str or "connection aborted" in err_str:
+                    needs_browser = True
+                    last_error = "blocked"
+                    break
                 if is_primary:
-                    if "connection reset" in err_str or "connection aborted" in err_str:
-                        return (
-                            "Connection blocked by the site's bot protection (likely Cloudflare). "
-                            "This site actively rejects automated requests. "
-                            "Try analyzing the homepage or a different page."
-                        )
                     return "Could not connect to the site. Check the URL or your network connection."
                 return None
             except requests.exceptions.TooManyRedirects:
@@ -353,11 +358,62 @@ class VibeCodingAnalyzer:
                     return f"Failed to fetch: {str(exc)[:200]}"
                 return None
 
-        # Both attempts failed
+        # ── Fallback: headless browser for protected sites ─────────────
+        if needs_browser:
+            browser_result = self._fetch_with_browser(url)
+            if browser_result is not None:
+                return browser_result
+            # Browser fallback also failed
+            if is_primary:
+                reason = {
+                    "blocked": "Connection blocked by the site's bot protection.",
+                    "timeout": "Request timed out.",
+                }.get(str(last_error), f"HTTP {last_error}.")
+                return (
+                    f"{reason} We also tried a headless browser but could not load the page. "
+                    "The site may require login or use advanced bot protection."
+                )
+            return None
+
+        # Both HTTP attempts failed without triggering browser fallback
         if is_primary:
             msg = HTTP_ERROR_MESSAGES.get(last_error, "Failed to fetch the page after retrying.")
             return msg
         return None
+
+    def _fetch_with_browser(self, url):
+        """Fallback: use Playwright headless browser for Cloudflare-protected sites."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None
+
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1440, "height": 900},
+                    locale="en-US",
+                )
+                page = context.new_page()
+                resp = page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                # Wait a bit for any Cloudflare challenge JS to complete
+                page.wait_for_timeout(3000)
+                html = page.content()
+                headers = dict(resp.headers) if resp else {}
+                browser.close()
+
+                if len(html) < 200:
+                    return None  # Page likely didn't load properly
+
+                return PageData(url, html, headers, BeautifulSoup(html, "lxml"))
+        except Exception:
+            return None
 
     def _fetch_pages_parallel(self, urls):
         results = []
