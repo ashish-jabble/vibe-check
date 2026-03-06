@@ -6,6 +6,10 @@
 ![Flask](https://img.shields.io/badge/Flask-3.x-000000?logo=flask)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+<p align="center">
+  <img src="demo.gif" alt="VibeCheck Demo" width="800">
+</p>
+
 ## The Problem
 
 "Vibe coding" — building entire websites by prompting AI tools like **v0**, **Bolt.new**, **Lovable**, **Cursor**, and others — has exploded in popularity. While this unlocks incredible speed, it also introduces real concerns:
