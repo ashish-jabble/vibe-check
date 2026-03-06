@@ -10,6 +10,10 @@
   <img src="demo.gif" alt="VibeCheck Demo" width="800">
 </p>
 
+<p align="center">
+  📖 <a href="https://jabbleashish.blogspot.com/2026/03/tool-that-detects-if-website-was-vibe.html"><b>Read the full blog post →</b></a>
+</p>
+
 ## The Problem
 
 "Vibe coding" — building entire websites by prompting AI tools like **v0**, **Bolt.new**, **Lovable**, **Cursor**, and others — has exploded in popularity. While this unlocks incredible speed, it also introduces real concerns:
