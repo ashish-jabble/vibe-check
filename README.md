@@ -1,5 +1,35 @@
 # ⚡ VibeCheck — Vibe Coding Detector
 
+AI-powered app that analyzes conversations and determines the vibe or sentiment using modern AI models.
+
+[![Live Demo](https://img.shields.io/badge/Live-Demo-green?style=for-the-badge&logo=vercel)](https://vibe-check-ebon-seven.vercel.app/)
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?logo=vercel)](https://vibe-check-ebon-seven.vercel.app/)
+
+## 🛠 Tech Stack
+
+**Frontend**
+
+* Next.js
+
+* React
+
+* Tailwind CSS
+
+**Backend / APIs**
+
+* Serverless API routes
+
+* AI model integration
+
+**Infrastructure**
+
+* Vercel (hosting & deployment)
+
+* GitHub (source control)
+
+
+## 📸 Screenshots
+
 > Paste any URL. Find out if the site was vibe coded.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
@@ -159,3 +189,7 @@ Contributions are welcome! Some ideas:
 ## License
 
 MIT — use it however you like.
+
+## ⭐ Support
+
+If you like this project, please consider starring the repository on GitHub.
