@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
+import logging
 
 
 # ── Request constants ───────────────────────────────────────────────
@@ -354,8 +355,10 @@ class VibeCodingAnalyzer:
                     return "Too many redirects. The site may be misconfigured."
                 return None
             except Exception as exc:
+                # Log full exception details server-side, but return a generic message to the user.
+                logging.exception("Unexpected error while fetching URL %s", url)
                 if is_primary:
-                    return f"Failed to fetch: {str(exc)[:200]}"
+                    return "Failed to fetch the site due to an unexpected error. Please try again later."
                 return None
 
         # ── Fallback: headless browser for protected sites ─────────────
