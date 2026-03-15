@@ -7,7 +7,7 @@ body:
     attributes:
       label: Checklist
       options:
-        - label: I searched existing issues and this hasn't been reported
+        - label: I have reviewed the current issues, and this has not been reported.
           required: true
 
   - type: dropdown

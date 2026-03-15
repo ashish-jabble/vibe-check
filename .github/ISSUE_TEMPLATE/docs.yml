@@ -1,0 +1,38 @@
+name: 📚 Documentation
+description: Enhancements or supplementary content to the documentation
+labels: ["documentation", "needs-triage", "help wanted"]
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Lack of documentation
+        - Inaccurate or outdated information
+        - Suggestions for improvement
+        - Corrections for typos or grammatical errors
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Which file or page?
+      placeholder: "e.g., README.md"
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What modifications are necessary?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I am prepared to submit a pull request for this.
+
