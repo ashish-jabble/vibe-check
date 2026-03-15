@@ -1,0 +1,45 @@
+name: ❓ Question
+description: Requires further explanation
+labels: ["question", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before posing your question:** Check [Discussions](https://github.com/ashish-jabble/vibe-check/discussions) - it is possible that your inquiry has already been addressed there!
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I explored the current issues and discussions for comparable inquiries.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Setup
+        - Frontend
+        - Backend
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      placeholder: "Please provide a detailed description of your question..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What is your objective?
+    validations:
+      required: true
+
