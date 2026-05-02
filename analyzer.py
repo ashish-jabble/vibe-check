@@ -204,7 +204,13 @@ def _resolve_safe(url: str) -> tuple[str, str]:
     except socket.gaierror as exc:
         raise UnsafeURLError("could not resolve hostname") from exc
 
+    # Skip private/internal IPs and pick the first public one. We pin DNS to
+    # this IP for the actual connect, so even when the answer set mixes public
+    # and private IPs (e.g. dual-stack NAT64), the connection only ever goes
+    # to the address we just classified as safe. Fail closed only if EVERY
+    # resolved IP is unsafe.
     safe_ip = None
+    saw_unsafe = False
     for info in infos:
         ip_str = info[4][0].split("%", 1)[0]  # strip IPv6 zone id if present
         try:
@@ -213,10 +219,15 @@ def _resolve_safe(url: str) -> tuple[str, str]:
             continue
         if (ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
-            raise UnsafeURLError("host resolves to a private/internal IP")
+            saw_unsafe = True
+            continue
         if safe_ip is None:
             safe_ip = ip_str
     if safe_ip is None:
+        # Distinguish "all answers were unsafe" from "no answer at all" so
+        # operators can tell DNS poisoning from a misconfigured hostname.
+        if saw_unsafe:
+            raise UnsafeURLError("host resolves only to private/internal IPs")
         raise UnsafeURLError("could not resolve hostname")
     return host, safe_ip
 

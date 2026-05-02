@@ -2,6 +2,7 @@
 
 AI-powered app that analyzes conversations and determines the vibe or sentiment using modern AI models.
 
+[![Tests](https://github.com/ashish-jabble/vibe-check/actions/workflows/tests.yml/badge.svg)](https://github.com/ashish-jabble/vibe-check/actions/workflows/tests.yml)
 [![Live Demo](https://img.shields.io/badge/Live-Demo-green?style=for-the-badge&logo=vercel)](https://vibe-check-ebon-seven.vercel.app/)
 [![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?logo=vercel)](https://vibe-check-ebon-seven.vercel.app/)
 
@@ -149,22 +150,100 @@ The app will be available at **http://127.0.0.1:5000**.
 3. Click **Analyze** and wait a few seconds.
 4. Review the Vibe Score and detailed category breakdown.
 
+## 🧪 Testing
+
+The suite uses [pytest](https://docs.pytest.org/) and is split into three layers
+under `tests/`. Run the whole thing before any commit; run the relevant subset
+while iterating.
+
+### Layout
+
+| Directory | What it covers | Needs network? | Typical runtime |
+|---|---|---|---|
+| `tests/unit/` | Pure logic — SSRF validator, DNS-pin context manager, tier scoring, dedupe, regexes, DOM helpers, individual detector methods (fed canned HTML) | No | <0.2 s |
+| `tests/smoke/` | API contract via the Flask test client — endpoint shape, error cases, body-size cap, rate limiter, SSRF rejection at the HTTP layer | No | <0.2 s |
+| `tests/integration/` | End-to-end fetch + analyze against `example.com`, `google.com`, `vercel.com`. Verifies real TLS round-trip with DNS pinning and brotli decoding. | Yes | ~5 s |
+
+`tests/conftest.py` provides a `client` fixture (Flask test client), a
+`make_page` factory for building `PageData` objects in detector tests, and
+**autouse** fixtures that reset the rate-limit counters and thread-local DNS
+overrides between tests so any test can be run in isolation.
+
+### Prerequisites
+
+Install the dev requirements (which already include `pytest`):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Running
+
+```bash
+# Full suite — 126 tests, ~5 s with internet
+pytest
+
+# Offline-friendly — skips the integration layer
+pytest -m "not integration"
+
+# One layer at a time
+pytest tests/unit          # 102 tests, 0.18 s
+pytest tests/smoke         # 16 tests,  0.11 s
+pytest tests/integration   # 8 tests,   ~5 s
+
+# One file
+pytest tests/unit/test_ssrf_validation.py
+
+# One test (use :: to drill into class + method)
+pytest tests/unit/test_dns_pin.py::TestDNSPin::test_thread_local_isolation -v
+```
+
+### Markers
+
+`pytest.ini` declares one custom marker:
+
+| Marker | Meaning |
+|---|---|
+| `integration` | Test requires outbound HTTP — skip with `-m "not integration"` when offline or in an air-gapped CI runner |
+
+`addopts = -ra --strict-markers` makes pytest list any unmarked-but-flagged
+tests on every run and reject typos in marker names.
+
+### When you change something
+
+| Change | Run at minimum |
+|---|---|
+| A detector or scoring rule | `pytest tests/unit` |
+| Anything in `app.py` (routes, limits, hooks) | `pytest tests/smoke` |
+| `_safe_get`, `_resolve_safe`, `_DNSPin`, or any HTTP/DNS code | `pytest tests/unit/test_ssrf_validation.py tests/unit/test_dns_pin.py tests/integration` |
+| Anything before pushing | `pytest` (full) |
+
 ## Project Structure
 
 ```
 vibe-check/
-├── app.py                  # Flask server — serves UI & /api/analyze endpoint
-├── analyzer.py             # Core detection engine — 7 category heuristics
-├── requirements.txt        # Python dependencies
-├── .gitignore              # Git ignore rules
-├── README.md               # You are here
+├── app.py                      # Flask server — serves UI & /api/analyze endpoint
+├── analyzer.py                 # Core detection engine — 9 category heuristics + SSRF guards
+├── requirements.in             # Source-of-truth top-level prod deps (edit this)
+├── requirements.txt            # Generated lockfile (do not edit; pip-compile)
+├── requirements-dev.in         # Source-of-truth dev deps (edit this)
+├── requirements-dev.txt        # Generated lockfile (do not edit; pip-compile)
+├── pytest.ini                  # Pytest config (testpaths, markers)
+├── CLAUDE.md                   # Notes for AI coding assistants working on this repo
+├── SECURITY.md                 # Vulnerability reporting policy + hardening summary
+├── README.md                   # You are here
 ├── static/
 │   ├── css/
-│   │   └── style.css       # Premium dark UI with animations
+│   │   └── style.css           # Premium dark UI with animations
 │   └── js/
-│       └── app.js          # Frontend logic — form, loading, results
-└── templates/
-    └── index.html          # Main HTML template
+│       └── app.js              # Frontend logic — form, loading, results
+├── templates/
+│   └── index.html              # Main HTML template
+└── tests/
+    ├── conftest.py             # Shared fixtures (client, autouse resets, make_page)
+    ├── unit/                   # Pure-logic tests, no I/O
+    ├── smoke/                  # API contracts via Flask test client
+    └── integration/            # End-to-end against the real internet
 ```
 
 ## API Usage
