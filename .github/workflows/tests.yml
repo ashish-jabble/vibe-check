@@ -1,0 +1,46 @@
+name: Tests
+
+# Run the full pytest suite on every push and on every PR targeting main.
+# Concurrency: when a new commit lands on a branch, cancel any older in-flight
+# run for the same ref so we don't pay for stale results.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          # Cache pip's download cache keyed off the dev lockfile. Cache hit ≈ 5–8 s
+          # saved per run; safe because requirements-dev.txt is fully pinned.
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # Full suite: unit + smoke + integration. Integration tests need outbound
+        # HTTP — GitHub runners have it. If a public site we hit (example.com,
+        # google.com, vercel.com) is briefly down, re-run the job manually.
+        run: pytest -q
