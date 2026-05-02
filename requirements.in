@@ -1,0 +1,10 @@
+# Production dependencies (top-level only). Compile with:
+#     pip-compile requirements.in
+# Do not edit requirements.txt by hand — it is generated.
+
+flask
+flask-limiter
+requests
+beautifulsoup4
+lxml
+playwright

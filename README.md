@@ -104,8 +104,34 @@ source venv/bin/activate        # macOS / Linux
 
 ### 3. Install Dependencies
 
+For running the app:
+
 ```bash
 pip install -r requirements.txt
+```
+
+For development (adds pytest + pip-tools on top of prod):
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Updating dependencies
+
+`requirements.txt` and `requirements-dev.txt` are **generated** by
+[pip-tools](https://pip-tools.readthedocs.io/) — do not hand-edit them.
+The source-of-truth files are `requirements.in` (prod) and
+`requirements-dev.in` (prod + tests + tooling).
+
+To bump or add a dependency:
+
+```bash
+# 1. Edit requirements.in or requirements-dev.in
+# 2. Recompile (always do prod first — dev pins to it via -c)
+pip-compile requirements.in
+pip-compile requirements-dev.in
+# 3. Sync your venv
+pip install -r requirements-dev.txt
 ```
 
 ### 4. Start the Server
