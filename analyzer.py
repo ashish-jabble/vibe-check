@@ -96,35 +96,115 @@ HTTP_ERROR_MESSAGES = {
 
 
 # ── SSRF protection ─────────────────────────────────────────────────
+#
+# Two-layer defence:
+#  1. _resolve_safe() validates the URL and resolves the hostname to a public IP,
+#     rejecting any IP that's private/loopback/link-local/multicast/reserved.
+#  2. _DNSPin pins that IP into a thread-local DNS override; while pinned,
+#     socket.getaddrinfo() returns the validated IP without re-resolving.
+#     This closes the DNS-rebinding window between validation and the actual
+#     TCP connect (where requests/urllib3 would otherwise call getaddrinfo
+#     a second time and could be served a different IP).
+#
+# TLS, SNI, the Host header, and certificate verification all continue to use
+# the original hostname — only the address used for connect() is pinned.
 
 class UnsafeURLError(Exception):
     """Raised when a URL is rejected (scheme, blocked host, private IP, oversized body, redirect loop)."""
 
 
-def _validate_url_safe(url: str) -> str | None:
-    """Return None if the URL is safe to fetch, otherwise a short reason string.
+_dns_overrides = threading.local()
+_real_getaddrinfo = socket.getaddrinfo
 
-    Rejects: non-http(s) schemes, missing host, blocked hostnames, and any
-    hostname that resolves to a private/loopback/link-local/multicast/reserved IP
-    in either IPv4 or IPv6.
+
+def _patched_getaddrinfo(host, port=None, *args, **kwargs):
+    """Drop-in replacement for socket.getaddrinfo that honours thread-local pins.
+
+    When a hostname has a pinned IP (set via _DNSPin), return that IP synthetically
+    instead of doing real DNS. Falls through to the real getaddrinfo otherwise so
+    Flask, logging, and any other non-fetch code is unaffected.
+    """
+    overrides = getattr(_dns_overrides, "map", None)
+    if overrides:
+        ip = overrides.get(host)
+        if ip is not None:
+            try:
+                ipaddress.IPv6Address(ip)
+                family = socket.AF_INET6
+                sockaddr = (ip, port or 0, 0, 0)
+            except ValueError:
+                family = socket.AF_INET
+                sockaddr = (ip, port or 0)
+            return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+    return _real_getaddrinfo(host, port, *args, **kwargs)
+
+
+socket.getaddrinfo = _patched_getaddrinfo
+
+
+class _DNSPin:
+    """Thread-local DNS override context manager.
+
+    Within the with-block, ``socket.getaddrinfo(hostname, ...)`` returns the
+    pinned IP instead of consulting DNS. Use this to ensure the actual TCP
+    connect uses the IP we already validated, not a freshly-resolved (and
+    potentially attacker-controlled) one.
+    """
+
+    def __init__(self, hostname: str, ip: str):
+        self._hostname = hostname
+        self._ip = ip
+
+    def __enter__(self):
+        existing = getattr(_dns_overrides, "map", None)
+        if existing is None:
+            existing = {}
+            _dns_overrides.map = existing
+        self._was_set = self._hostname in existing
+        self._previous = existing.get(self._hostname)
+        existing[self._hostname] = self._ip
+        return self
+
+    def __exit__(self, *_exc):
+        existing = getattr(_dns_overrides, "map", None)
+        if existing is None:
+            return
+        if self._was_set:
+            existing[self._hostname] = self._previous
+        else:
+            existing.pop(self._hostname, None)
+
+
+def _resolve_safe(url: str) -> tuple[str, str]:
+    """Validate the URL and return (hostname, validated_ip).
+
+    Pinning DNS to the returned IP for the actual fetch guarantees the
+    connect() goes to the address we just classified as public.
+
+    Raises:
+        UnsafeURLError: scheme/host invalid, host blocked, no resolution, or
+        any resolved IP is private/loopback/link-local/multicast/reserved.
     """
     try:
         parsed = urlparse(url)
-    except (ValueError, TypeError):
-        return "invalid URL"
+    except (ValueError, TypeError) as exc:
+        raise UnsafeURLError("invalid URL") from exc
     if parsed.scheme not in ("http", "https"):
-        return "scheme must be http or https"
+        raise UnsafeURLError("scheme must be http or https")
     host = parsed.hostname
     if not host:
-        return "URL must include a hostname"
+        raise UnsafeURLError("URL must include a hostname")
     if host.lower() in BLOCKED_HOSTS:
-        return "host is blocked"
+        raise UnsafeURLError("host is blocked")
 
+    # Use the REAL getaddrinfo so we never validate against a value we ourselves
+    # pinned in a previous iteration of the redirect loop.
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return "could not resolve hostname"
+        infos = _real_getaddrinfo(host, parsed.port)
+    except socket.gaierror as exc:
+        raise UnsafeURLError("could not resolve hostname") from exc
 
+    safe_ip = None
     for info in infos:
         ip_str = info[4][0].split("%", 1)[0]  # strip IPv6 zone id if present
         try:
@@ -133,14 +213,31 @@ def _validate_url_safe(url: str) -> str | None:
             continue
         if (ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
-            return "host resolves to a private/internal IP"
+            raise UnsafeURLError("host resolves to a private/internal IP")
+        if safe_ip is None:
+            safe_ip = ip_str
+    if safe_ip is None:
+        raise UnsafeURLError("could not resolve hostname")
+    return host, safe_ip
+
+
+def _validate_url_safe(url: str) -> str | None:
+    """Return None if the URL is safe to fetch, otherwise a short reason string.
+
+    Thin wrapper around _resolve_safe for callers (e.g. the Playwright fallback)
+    that don't need the resolved IP.
+    """
+    try:
+        _resolve_safe(url)
+    except UnsafeURLError as exc:
+        return str(exc)
     return None
 
 
 def _safe_get(url, *, headers=None, timeout=REQUEST_TIMEOUT,
               max_bytes=MAX_PAGE_BYTES, allow_redirects=True,
               max_redirects=MAX_REDIRECTS):
-    """HTTP GET with SSRF validation, manual redirect handling, and bounded body size.
+    """HTTP GET with SSRF validation, manual redirect handling, DNS-pinning, and bounded body size.
 
     Raises:
         UnsafeURLError: URL or any redirect target fails validation, or redirect limit exceeded.
@@ -153,35 +250,43 @@ def _safe_get(url, *, headers=None, timeout=REQUEST_TIMEOUT,
     current_url = url
     redirects_remaining = max_redirects if allow_redirects else 0
     while True:
-        err = _validate_url_safe(current_url)
-        if err:
-            raise UnsafeURLError(err)
-        resp = requests.get(current_url, headers=headers or {}, timeout=timeout,
-                            allow_redirects=False, stream=True)
-        if resp.is_redirect and allow_redirects:
-            location = resp.headers.get("Location")
-            resp.close()
-            if not location:
-                raise UnsafeURLError("redirect with no Location header")
-            if redirects_remaining <= 0:
-                raise UnsafeURLError("too many redirects")
-            redirects_remaining -= 1
-            current_url = urljoin(current_url, location)
-            continue
+        # Validate AND get the IP to pin. Done outside the pin context so the
+        # validator's getaddrinfo call always hits the real DNS.
+        hostname, pinned_ip = _resolve_safe(current_url)
 
-        # Read up to max_bytes, then stop. Truncation is silent — detectors operate
-        # on whatever fits in the cap. This bounds memory regardless of server behavior.
-        content = bytearray()
-        try:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if not chunk:
-                    continue
-                content.extend(chunk)
-                if len(content) >= max_bytes:
-                    content = content[:max_bytes]
-                    break
-        finally:
-            resp.close()
+        # Pin the validated IP for the duration of this single fetch. The TCP
+        # connect inside requests.get() will use this IP via _patched_getaddrinfo;
+        # SNI/Host/cert verification still use the original hostname because the
+        # URL itself is unchanged.
+        with _DNSPin(hostname, pinned_ip):
+            resp = requests.get(current_url, headers=headers or {}, timeout=timeout,
+                                allow_redirects=False, stream=True)
+            if resp.is_redirect and allow_redirects:
+                location = resp.headers.get("Location")
+                resp.close()
+                if not location:
+                    raise UnsafeURLError("redirect with no Location header")
+                if redirects_remaining <= 0:
+                    raise UnsafeURLError("too many redirects")
+                redirects_remaining -= 1
+                current_url = urljoin(current_url, location)
+                continue
+
+            # Read up to max_bytes, then stop. Truncation is silent — detectors
+            # operate on whatever fits in the cap. Body read happens inside the
+            # pinned context to keep the connection's IP consistent if urllib3
+            # ever needs to reconnect mid-stream.
+            content = bytearray()
+            try:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    content.extend(chunk)
+                    if len(content) >= max_bytes:
+                        content = content[:max_bytes]
+                        break
+            finally:
+                resp.close()
         resp._content = bytes(content)
         resp.url = current_url
         return resp
