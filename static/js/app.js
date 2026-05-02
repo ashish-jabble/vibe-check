@@ -47,7 +47,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         showSection("loading");
         setButtonLoading(true);
-        animateLoadingSteps();
+        const stopAnim = animateLoadingSteps();
 
         try {
             const response = await fetch("/api/analyze", {
@@ -56,15 +56,25 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ url }),
             });
 
-            const data = await response.json();
+            // Server may return non-JSON on infra errors (e.g. an HTML 504 page).
+            // Parse defensively so the user sees something useful.
+            const raw = await response.text();
+            let data;
+            try {
+                data = raw ? JSON.parse(raw) : {};
+            } catch {
+                data = {};
+            }
             if (!response.ok || data.error) {
-                throw new Error(data.error || "Unknown error occurred");
+                const fallback = `Request failed (${response.status} ${response.statusText || "error"})`;
+                throw new Error(data.error || fallback);
             }
 
-            await sleep(800);
+            stopAnim();
             showSection("results");
             renderResults(data);
         } catch (err) {
+            stopAnim();
             showSection("error");
             errorMessage.textContent = err.message;
         } finally {
@@ -94,20 +104,26 @@ document.addEventListener("DOMContentLoaded", () => {
     function animateLoadingSteps() {
         const steps = Array.from(loadingSteps);
         steps.forEach((s) => s.classList.remove("active", "done"));
+        if (!steps.length) return () => {};
         let i = 0;
         steps[0].classList.add("active");
+        // Tick to the next step every ~1.2 s; once we reach the final step,
+        // stop advancing — the spinner remains on it until the API responds.
         const interval = setInterval(() => {
-            if (i < steps.length) {
-                steps[i].classList.remove("active");
-                steps[i].classList.add("done");
-            }
-            i++;
-            if (i < steps.length) {
-                steps[i].classList.add("active");
-            } else {
-                clearInterval(interval);
-            }
-        }, 600);
+            if (i >= steps.length - 1) return;
+            steps[i].classList.remove("active");
+            steps[i].classList.add("done");
+            i += 1;
+            steps[i].classList.add("active");
+        }, 1200);
+        return () => {
+            clearInterval(interval);
+            // Mark every step done once the API call finishes.
+            steps.forEach((s) => {
+                s.classList.remove("active");
+                s.classList.add("done");
+            });
+        };
     }
 
     // ── Render results ──────────────────────────────────────────────
@@ -288,10 +304,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const div = document.createElement("div");
         div.textContent = text;
         return div.innerHTML;
-    }
-
-    function sleep(ms) {
-        return new Promise((r) => setTimeout(r, ms));
     }
 
     function createParticles() {

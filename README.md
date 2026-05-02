@@ -7,24 +7,22 @@ AI-powered app that analyzes conversations and determines the vibe or sentiment 
 
 ## 🛠 Tech Stack
 
+**Backend**
+
+* Python 3.9+ / Flask
+* `requests` + `BeautifulSoup` (lxml parser) — primary fetch path
+* Playwright (chromium) — headless-browser fallback for bot-protected sites
+* Flask-Limiter — request rate limiting
+
 **Frontend**
 
-* Next.js
-
-* React
-
-* Tailwind CSS
-
-**Backend / APIs**
-
-* Serverless API routes
-
-* AI model integration
+* Vanilla HTML / CSS / JavaScript
+* Jinja2 template (`templates/index.html`)
+* No build step, no JS framework
 
 **Infrastructure**
 
 * Vercel (hosting & deployment)
-
 * GitHub (source control)
 
 

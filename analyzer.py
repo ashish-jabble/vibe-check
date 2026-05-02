@@ -12,13 +12,19 @@ Evidence Tiers:
   - WEAK:       Only meaningful with other evidence (e.g., dark mode, Vercel deployment)
 """
 
+import ipaddress
+import logging
+import os
 import re
+import socket
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, urljoin
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter
-import logging
+from requests.structures import CaseInsensitiveDict
 
 
 # ── Request constants ───────────────────────────────────────────────
@@ -30,7 +36,9 @@ REQUEST_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # 'br' deliberately omitted — requests/urllib3 only auto-decodes gzip/deflate;
+    # accepting brotli without the optional `brotli` package returns compressed bytes.
+    "Accept-Encoding": "gzip, deflate",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
@@ -50,6 +58,32 @@ REQUEST_TIMEOUT = 15
 MAX_CRAWL_PAGES = 6
 MAX_ASSET_FETCH = 10
 
+# Hard ceilings on response body size — prevent memory exhaustion via huge responses.
+MAX_PAGE_BYTES = 5_000_000     # 5 MB per HTML page
+MAX_ASSET_BYTES = 500_000      # 500 KB per CSS/JS asset (matches prior inline truncation)
+MAX_PROBE_BYTES = 200_000      # 200 KB for robots.txt / sitemap.xml probes
+MAX_REDIRECTS = 5
+
+# Bound concurrent Playwright launches. Chromium is heavy (~200 MB resident);
+# without a cap, every 401/403/timeout fans out into a fresh browser process.
+# Override with VIBECHECK_BROWSER_CONCURRENCY env var.
+_BROWSER_CONCURRENCY = max(1, int(os.environ.get("VIBECHECK_BROWSER_CONCURRENCY", "2")))
+_browser_semaphore = threading.BoundedSemaphore(_BROWSER_CONCURRENCY)
+
+# Hostnames that must never be fetched regardless of DNS resolution.
+BLOCKED_HOSTS = frozenset({
+    "localhost",
+    "ip6-localhost",
+    "ip6-loopback",
+    "metadata.google.internal",
+    "metadata.goog",
+})
+
+URL_NOT_ALLOWED_MESSAGE = (
+    "This URL is not allowed. VibeCheck only analyzes publicly accessible "
+    "websites — private, internal, and loopback addresses are blocked."
+)
+
 HTTP_ERROR_MESSAGES = {
     401: "This site requires authentication. VibeCheck can only analyze publicly accessible pages.",
     403: "This site blocked our request (HTTP 403 Forbidden). It may use bot protection (Cloudflare, etc.). Try a different URL from the same site.",
@@ -59,6 +93,98 @@ HTTP_ERROR_MESSAGES = {
     502: "The target site returned a bad gateway error (HTTP 502). Try again later.",
     503: "The target site is temporarily unavailable (HTTP 503). Try again later.",
 }
+
+
+# ── SSRF protection ─────────────────────────────────────────────────
+
+class UnsafeURLError(Exception):
+    """Raised when a URL is rejected (scheme, blocked host, private IP, oversized body, redirect loop)."""
+
+
+def _validate_url_safe(url: str) -> str | None:
+    """Return None if the URL is safe to fetch, otherwise a short reason string.
+
+    Rejects: non-http(s) schemes, missing host, blocked hostnames, and any
+    hostname that resolves to a private/loopback/link-local/multicast/reserved IP
+    in either IPv4 or IPv6.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError):
+        return "invalid URL"
+    if parsed.scheme not in ("http", "https"):
+        return "scheme must be http or https"
+    host = parsed.hostname
+    if not host:
+        return "URL must include a hostname"
+    if host.lower() in BLOCKED_HOSTS:
+        return "host is blocked"
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return "could not resolve hostname"
+
+    for info in infos:
+        ip_str = info[4][0].split("%", 1)[0]  # strip IPv6 zone id if present
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return "host resolves to a private/internal IP"
+    return None
+
+
+def _safe_get(url, *, headers=None, timeout=REQUEST_TIMEOUT,
+              max_bytes=MAX_PAGE_BYTES, allow_redirects=True,
+              max_redirects=MAX_REDIRECTS):
+    """HTTP GET with SSRF validation, manual redirect handling, and bounded body size.
+
+    Raises:
+        UnsafeURLError: URL or any redirect target fails validation, or redirect limit exceeded.
+        requests.exceptions.RequestException: forwarded from underlying requests.get.
+
+    Returns:
+        requests.Response with the body fully read into ``_content`` (truncated at
+        ``max_bytes``). ``response.url`` is set to the final URL after redirects.
+    """
+    current_url = url
+    redirects_remaining = max_redirects if allow_redirects else 0
+    while True:
+        err = _validate_url_safe(current_url)
+        if err:
+            raise UnsafeURLError(err)
+        resp = requests.get(current_url, headers=headers or {}, timeout=timeout,
+                            allow_redirects=False, stream=True)
+        if resp.is_redirect and allow_redirects:
+            location = resp.headers.get("Location")
+            resp.close()
+            if not location:
+                raise UnsafeURLError("redirect with no Location header")
+            if redirects_remaining <= 0:
+                raise UnsafeURLError("too many redirects")
+            redirects_remaining -= 1
+            current_url = urljoin(current_url, location)
+            continue
+
+        # Read up to max_bytes, then stop. Truncation is silent — detectors operate
+        # on whatever fits in the cap. This bounds memory regardless of server behavior.
+        content = bytearray()
+        try:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                content.extend(chunk)
+                if len(content) >= max_bytes:
+                    content = content[:max_bytes]
+                    break
+        finally:
+            resp.close()
+        resp._content = bytes(content)
+        resp.url = current_url
+        return resp
 
 
 # ── Evidence Tier System ────────────────────────────────────────────
@@ -76,8 +202,10 @@ TIER_POINTS = {
     Tier.WEAK:        2,
 }
 
+_UNCAPPED = float("inf")
+
 TIER_CAPS = {
-    Tier.DEFINITIVE: 100,  # no cap – definitive proof should dominate
+    Tier.DEFINITIVE: _UNCAPPED,  # definitive proof should dominate, no per-tier ceiling
     Tier.STRONG:      40,
     Tier.MODERATE:    25,
     Tier.WEAK:        10,
@@ -125,6 +253,22 @@ class CategoryResult:
         self.name = name
         self.icon = icon
         self.findings = findings or []
+        # (signal, tier) pairs already added — used by add() to dedupe.
+        self._seen = {(f.signal, f.tier) for f in self.findings}
+
+    def add(self, finding: "Finding") -> bool:
+        """Append a finding only if (signal, tier) hasn't been recorded yet.
+
+        Returns True if added, False if it was a duplicate. Use this instead of
+        ``self.findings.append(...)`` whenever a detection path could fire more
+        than once for the same evidence (e.g. iterating multiple pages).
+        """
+        key = (finding.signal, finding.tier)
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        self.findings.append(finding)
+        return True
 
     @property
     def score(self):
@@ -212,6 +356,15 @@ STOCK_DOMAINS = [
     "placekitten.com", "picsum.photos", "via.placeholder.com", "dummyimage.com",
 ]
 
+# Generic page titles. The trailing \b prevents matching real titles whose first
+# word merely shares a prefix (e.g. "My Apparel Co." starts with "my app" but is
+# not a generic title — \b requires a word boundary after the prefix).
+GENERIC_TITLE_RE = re.compile(
+    r"^(?:home|welcome|untitled|my app|my site|my website|"
+    r"create next app|vite app|vite \+ react)\b",
+    re.IGNORECASE,
+)
+
 
 # ====================================================================
 # Main Analyzer
@@ -289,12 +442,14 @@ class VibeCodingAnalyzer:
         tier_points = {}
         for tier in (Tier.DEFINITIVE, Tier.STRONG, Tier.MODERATE, Tier.WEAK):
             raw = sum(f.points for f in findings if f.tier == tier)
-            capped = min(raw, TIER_CAPS[tier])
+            cap = TIER_CAPS[tier]
+            capped = raw if cap == _UNCAPPED else min(raw, cap)
             tier_points[tier] = {
                 "count": tier_counts.get(tier, 0),
                 "raw_points": raw,
                 "capped_points": capped,
-                "cap": TIER_CAPS[tier],
+                # Use null in JSON to signal "no cap" (Infinity is not valid JSON).
+                "cap": None if cap == _UNCAPPED else cap,
                 "label": TIER_LABELS[tier],
             }
         return tier_points
@@ -313,11 +468,17 @@ class VibeCodingAnalyzer:
             if attempt == 1:
                 headers["User-Agent"] = ALT_USER_AGENT
             try:
-                resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
-                                    allow_redirects=True)
+                resp = _safe_get(url, headers=headers, timeout=REQUEST_TIMEOUT,
+                                 max_bytes=MAX_PAGE_BYTES)
                 resp.raise_for_status()
-                return PageData(url, resp.text, dict(resp.headers),
+                return PageData(url, resp.text, CaseInsensitiveDict(resp.headers),
                                 BeautifulSoup(resp.text, "lxml"))
+            except UnsafeURLError as exc:
+                # SSRF guard — never retry, never fall back to browser.
+                logging.warning("Rejected unsafe URL %s: %s", url, exc)
+                if is_primary:
+                    return URL_NOT_ALLOWED_MESSAGE
+                return None
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
                 if status == 403 and attempt == 0:
@@ -354,7 +515,7 @@ class VibeCodingAnalyzer:
                 if is_primary:
                     return "Too many redirects. The site may be misconfigured."
                 return None
-            except Exception as exc:
+            except Exception:
                 # Log full exception details server-side, but return a generic message to the user.
                 logging.exception("Unexpected error while fetching URL %s", url)
                 if is_primary:
@@ -366,12 +527,16 @@ class VibeCodingAnalyzer:
             browser_result = self._fetch_with_browser(url)
             if browser_result is not None:
                 return browser_result
-            # Browser fallback also failed
+            # Browser fallback also failed — build a useful reason.
             if is_primary:
-                reason = {
-                    "blocked": "Connection blocked by the site's bot protection.",
-                    "timeout": "Request timed out.",
-                }.get(str(last_error), f"HTTP {last_error}.")
+                if last_error == "blocked":
+                    reason = "Connection blocked by the site's bot protection."
+                elif last_error == "timeout":
+                    reason = "Request timed out."
+                elif isinstance(last_error, int) and last_error:
+                    reason = f"HTTP {last_error}."
+                else:
+                    reason = "Unable to fetch the page."
                 return (
                     f"{reason} We also tried a headless browser but could not load the page. "
                     "The site may require login or use advanced bot protection."
@@ -387,10 +552,28 @@ class VibeCodingAnalyzer:
     def _fetch_with_browser(self, url):
         """Fallback: use Playwright headless browser for Cloudflare-protected sites."""
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import (
+                sync_playwright,
+                Error as PlaywrightError,
+                TimeoutError as PlaywrightTimeoutError,
+            )
         except ImportError:
             return None
 
+        # SSRF check before launching the browser. Note: Playwright follows redirects
+        # internally, so a public URL that 302s to a private IP is not blocked here.
+        # The primary attack surface (user-supplied URL) is covered.
+        err = _validate_url_safe(url)
+        if err:
+            logging.warning("Browser fallback rejected URL %s: %s", url, err)
+            return None
+
+        # Bound concurrent chromium launches. If the cap is saturated, skip the
+        # fallback rather than queue (callers handle None) — keeps latency bounded
+        # under load.
+        if not _browser_semaphore.acquire(blocking=False):
+            logging.warning("Browser fallback skipped (concurrency cap reached) for %s", url)
+            return None
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
@@ -408,15 +591,18 @@ class VibeCodingAnalyzer:
                 # Wait a bit for any Cloudflare challenge JS to complete
                 page.wait_for_timeout(3000)
                 html = page.content()
-                headers = dict(resp.headers) if resp else {}
+                headers = CaseInsensitiveDict(resp.headers) if resp else CaseInsensitiveDict()
                 browser.close()
 
                 if len(html) < 200:
                     return None  # Page likely didn't load properly
 
                 return PageData(url, html, headers, BeautifulSoup(html, "lxml"))
-        except Exception:
+        except (PlaywrightError, PlaywrightTimeoutError):
+            logging.warning("Playwright fallback failed for %s", url, exc_info=True)
             return None
+        finally:
+            _browser_semaphore.release()
 
     def _fetch_pages_parallel(self, urls):
         results = []
@@ -429,15 +615,25 @@ class VibeCodingAnalyzer:
         return results
 
     def _discover_internal_links(self, page, base_origin):
-        seen = {page.url.rstrip("/")}
+        # Hosts are case-insensitive — normalise scheme+host to lowercase before
+        # dedupe so "Example.com/" and "example.com/" count as the same URL.
+        def _normalise(u):
+            parsed = urlparse(u)
+            host = (parsed.hostname or "").lower()
+            port = f":{parsed.port}" if parsed.port else ""
+            path = parsed.path.rstrip("/")
+            return f"{parsed.scheme.lower()}://{host}{port}{path}"
+
+        base_origin_lower = base_origin.lower()
+        seen = {_normalise(page.url)}
         links = []
         for a in page.soup.find_all("a", href=True):
             href = a["href"].strip()
             if href.startswith(("#", "javascript:", "mailto:", "tel:")):
                 continue
             full = urljoin(page.url, href).split("#")[0].split("?")[0]
-            norm = full.rstrip("/")
-            if not full.startswith(base_origin) or norm in seen:
+            norm = _normalise(full)
+            if not norm.startswith(base_origin_lower) or norm in seen:
                 continue
             if re.search(r"\.(png|jpg|jpeg|gif|svg|webp|pdf|zip|mp4|ico|woff2?|ttf|eot)$",
                          full, re.IGNORECASE):
@@ -456,9 +652,13 @@ class VibeCodingAnalyzer:
 
         def fetch(url):
             try:
-                r = requests.get(url, headers=REQUEST_HEADERS, timeout=8)
+                r = _safe_get(url, headers=REQUEST_HEADERS, timeout=8,
+                              max_bytes=MAX_ASSET_BYTES)
                 r.raise_for_status()
-                return url, r.text[:500_000]
+                return url, r.text
+            except UnsafeURLError as exc:
+                logging.info("Skipping unsafe asset URL %s: %s", url, exc)
+                return url, None
             except Exception:
                 return url, None
 
@@ -478,67 +678,70 @@ class VibeCodingAnalyzer:
 
     def _check_ai_platforms(self, pages, asset_text):
         cat = CategoryResult("AI Platform Signatures", "🤖")
-        F = cat.findings
         html_all = "\n".join(p.html for p in pages)
         html_lower = html_all.lower()
 
         # ── v0.dev (DEFINITIVE if data attributes found) ────────────────
+        v0_definitive = False
         for p in pages:
             if p.soup.find_all(attrs=lambda a: a and any(k.startswith("data-v0") for k in a)):
-                F.append(Finding("v0.dev", "data-v0-* attributes found — irrefutable v0.dev marker",
-                                 Tier.DEFINITIVE, "data-v0-* attributes"))
+                cat.add(Finding("v0.dev", "data-v0-* attributes found — irrefutable v0.dev marker",
+                                Tier.DEFINITIVE, "data-v0-* attributes"))
+                v0_definitive = True
                 break
-        if "v0.dev" in html_lower and not any(f.signal == "v0.dev" for f in F):
-            F.append(Finding("v0.dev", "Reference to v0.dev in source", Tier.STRONG))
+        # Only add the weaker STRONG finding when no DEFINITIVE one fired.
+        if not v0_definitive and "v0.dev" in html_lower:
+            cat.add(Finding("v0.dev", "Reference to v0.dev in source", Tier.STRONG))
 
         # ── Bolt.new / StackBlitz ──────────────────────────────────────
         for marker in ["bolt.new", "stackblitz"]:
             if marker in html_lower:
-                F.append(Finding("Bolt.new", f"'{marker}' reference in source", Tier.STRONG))
+                cat.add(Finding("Bolt.new", f"'{marker}' reference in source", Tier.STRONG))
         for p in pages:
             if p.soup.find_all(attrs={"data-bolt": True}):
-                F.append(Finding("Bolt.new", "data-bolt attributes — definitive Bolt marker",
-                                 Tier.DEFINITIVE))
+                cat.add(Finding("Bolt.new", "data-bolt attributes — definitive Bolt marker",
+                                Tier.DEFINITIVE))
                 break
 
         # ── Lovable / GPTEngineer ──────────────────────────────────────
         for marker in ["lovable", "gptengineer", "gpt-engineer"]:
             if marker in html_lower:
-                F.append(Finding("Lovable", f"'{marker}' reference in source", Tier.STRONG))
+                cat.add(Finding("Lovable", f"'{marker}' reference in source", Tier.STRONG))
 
         # ── Meta generator tag (DEFINITIVE) ────────────────────────────
         for p in pages:
             meta = p.soup.find("meta", attrs={"name": "generator"})
-            if meta:
-                content = (meta.get("content") or "").lower()
-                for name in ["v0", "bolt", "lovable", "gptengineer", "cursor", "windsurf", "replit"]:
-                    if name in content:
-                        F.append(Finding(name,
-                                         f"Meta generator tag explicitly names '{name}'",
-                                         Tier.DEFINITIVE, content))
+            if not meta:
+                continue
+            content = (meta.get("content") or "").lower()
+            for name in ["v0", "bolt", "lovable", "gptengineer", "cursor", "windsurf", "replit"]:
+                if name in content:
+                    cat.add(Finding(name,
+                                    f"Meta generator tag explicitly names '{name}'",
+                                    Tier.DEFINITIVE, content))
 
         # ── Vercel AI SDK ──────────────────────────────────────────────
         if re.search(r"@vercel/ai|ai/react|useChat|useCompletion", html_all):
-            F.append(Finding("Vercel AI SDK", "Vercel AI SDK references", Tier.MODERATE))
+            cat.add(Finding("Vercel AI SDK", "Vercel AI SDK references", Tier.MODERATE))
 
         # ── Vibe-stack packages in JS bundles ──────────────────────────
         if asset_text:
             hits = [p for p in VIBE_PACKAGES if p in asset_text]
             if len(hits) >= 6:
-                F.append(Finding("Vibe Stack",
-                                 f"Found {len(hits)} vibe-coding packages in bundles — classic AI-scaffolded stack",
-                                 Tier.STRONG, ", ".join(hits[:6])))
+                cat.add(Finding("Vibe Stack",
+                                f"Found {len(hits)} vibe-coding packages in bundles — classic AI-scaffolded stack",
+                                Tier.STRONG, ", ".join(hits[:6])))
             elif len(hits) >= 3:
-                F.append(Finding("Vibe Stack",
-                                 f"Found {len(hits)} vibe-coding packages in bundles",
-                                 Tier.MODERATE, ", ".join(hits)))
+                cat.add(Finding("Vibe Stack",
+                                f"Found {len(hits)} vibe-coding packages in bundles",
+                                Tier.MODERATE, ", ".join(hits)))
 
         # ── Replit ─────────────────────────────────────────────────────
         primary = pages[0]
         if ".repl.co" in primary.parsed.netloc or ".replit.dev" in primary.parsed.netloc:
-            F.append(Finding("Replit", "Hosted on Replit domain", Tier.MODERATE))
+            cat.add(Finding("Replit", "Hosted on Replit domain", Tier.MODERATE))
         if "replit" in html_lower:
-            F.append(Finding("Replit", "Replit reference in source", Tier.MODERATE))
+            cat.add(Finding("Replit", "Replit reference in source", Tier.MODERATE))
 
         return cat
 
@@ -703,11 +906,14 @@ class VibeCodingAnalyzer:
                              f"{len(cta_hits)} generic CTAs", Tier.WEAK,
                              ", ".join(sorted(set(cta_hits)))))
 
-        # Stock images
+        # Stock images. Modern lazy-loaders use any of these attributes to defer
+        # the real URL until the image scrolls into view, so check them all.
         stock_hits = []
+        img_src_attrs = ("src", "data-src", "data-srcset", "data-original",
+                         "data-lazy", "data-lazy-src", "srcset")
         for page in pages:
             for img in page.soup.find_all("img"):
-                src = img.get("src", "") or img.get("data-src", "")
+                src = " ".join(img.get(a, "") for a in img_src_attrs)
                 for domain in STOCK_DOMAINS:
                     if domain in src:
                         stock_hits.append(domain)
@@ -797,15 +1003,16 @@ class VibeCodingAnalyzer:
             if len(sections) < 3:
                 continue
 
-            # Get structural fingerprint for each section (tag sequence)
+            # Get structural fingerprint for each section (first 20 tags in order).
             fingerprints = []
             for sec in sections:
                 children_tags = []
                 for child in sec.descendants:
                     if hasattr(child, "name") and child.name:
                         children_tags.append(child.name)
-                # Fingerprint = first 20 tags in order
-                fp = tuple(children_tags[:20])
+                        if len(children_tags) >= 20:
+                            break  # avoid walking the whole subtree once we have enough
+                fp = tuple(children_tags)
                 if len(fp) >= 5:
                     fingerprints.append(fp)
 
@@ -842,19 +1049,31 @@ class VibeCodingAnalyzer:
         if ".onrender.com" in parsed.netloc:
             F.append(Finding("Render", "Deployed on Render", Tier.WEAK))
 
-        # Missing basics
-        try:
-            r = requests.get(f"{base_origin}/robots.txt", headers=REQUEST_HEADERS, timeout=5)
-            if r.status_code == 404:
-                F.append(Finding("No robots.txt", "Missing robots.txt", Tier.WEAK))
-        except Exception:
-            pass
-        try:
-            r = requests.get(f"{base_origin}/sitemap.xml", headers=REQUEST_HEADERS, timeout=5)
-            if r.status_code == 404:
-                F.append(Finding("No sitemap", "Missing sitemap.xml", Tier.WEAK))
-        except Exception:
-            pass
+        # Missing basics. Treat 404 OR a 200 that obviously isn't the right doc
+        # (SPA catch-all serving HTML for /sitemap.xml) as "missing".
+        def _missing(url, expected_keywords):
+            try:
+                r = _safe_get(url, headers=REQUEST_HEADERS,
+                              timeout=5, max_bytes=MAX_PROBE_BYTES)
+            except (UnsafeURLError, requests.exceptions.RequestException):
+                return False  # probe failed — don't claim "missing"
+            if r.status_code >= 400:
+                return True
+            if r.status_code == 200:
+                ctype = (r.headers.get("Content-Type") or "").lower()
+                # SPA catch-all: served as HTML rather than the expected text/xml
+                if "html" in ctype:
+                    return True
+                # Body sanity check: real robots/sitemap contains its keyword
+                body = (r.text or "").lower()
+                if body and not any(k in body for k in expected_keywords):
+                    return True
+            return False
+
+        if _missing(f"{base_origin}/robots.txt", ("user-agent", "disallow", "allow", "sitemap")):
+            F.append(Finding("No robots.txt", "Missing robots.txt", Tier.WEAK))
+        if _missing(f"{base_origin}/sitemap.xml", ("<urlset", "<sitemapindex", "<url>", "<loc>")):
+            F.append(Finding("No sitemap", "Missing sitemap.xml", Tier.WEAK))
 
         return cat
 
@@ -1013,13 +1232,11 @@ class VibeCodingAnalyzer:
                              "Missing or empty <title> tag",
                              Tier.WEAK))
         elif title:
-            title_text = title.get_text(strip=True).lower()
-            generic_titles = ["home", "welcome", "untitled", "my app", "my site", "my website",
-                              "create next app", "vite app", "vite + react"]
-            if any(t == title_text or title_text.startswith(t) for t in generic_titles):
+            title_text = title.get_text(strip=True)
+            if GENERIC_TITLE_RE.match(title_text):
                 F.append(Finding("Generic Title",
-                                 f"Page title is generic: '{title.get_text(strip=True)}'",
-                                 Tier.MODERATE, title.get_text(strip=True)))
+                                 f"Page title is generic: '{title_text}'",
+                                 Tier.MODERATE, title_text))
 
         # Favicon
         favicon = primary.soup.find("link", rel=lambda r: r and "icon" in r)
@@ -1042,13 +1259,23 @@ class VibeCodingAnalyzer:
     # ================================================================
 
     def _max_depth(self, el, d=0):
+        """Maximum tag-nesting depth under ``el``, computed iteratively to avoid
+        Python's recursion limit on pathologically deep DOMs."""
         if not hasattr(el, "children"):
             return d
-        mx = d
-        for c in el.children:
-            if hasattr(c, "name") and c.name:
-                mx = max(mx, self._max_depth(c, d + 1))
-        return mx
+        max_depth = d
+        stack = [(el, d)]
+        while stack:
+            node, depth = stack.pop()
+            if depth > max_depth:
+                max_depth = depth
+            children = getattr(node, "children", None)
+            if children is None:
+                continue
+            for child in children:
+                if hasattr(child, "name") and child.name:
+                    stack.append((child, depth + 1))
+        return max_depth
 
     @staticmethod
     def _detect_tailwind(html, asset_text):
