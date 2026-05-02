@@ -1,0 +1,15 @@
+# Dev / test dependencies (superset of production). Compile with:
+#     pip-compile requirements.in            # produces requirements.txt
+#     pip-compile requirements-dev.in        # produces requirements-dev.txt
+# Always compile requirements.in first — the constraint below pins shared
+# packages to the prod-locked versions so dev and prod never drift.
+# Do not edit requirements-dev.txt by hand — it is generated.
+
+-c requirements.txt
+-r requirements.in
+
+# Test runner
+pytest
+
+# Tooling for the lockfile workflow itself
+pip-tools
