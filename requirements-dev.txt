@@ -124,7 +124,7 @@ rich==13.9.4
     # via
     #   -c requirements.txt
     #   flask-limiter
-soupsieve==2.8.3
+soupsieve==2.8.4
     # via
     #   -c requirements.txt
     #   beautifulsoup4
